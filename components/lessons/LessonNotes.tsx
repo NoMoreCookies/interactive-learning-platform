@@ -21,7 +21,7 @@ function NoteItem({ note }: NoteItemProps) {
         type="button"
         onClick={() => setIsOpen((previous) => !previous)}
         aria-expanded={isOpen}
-        className="flex w-full cursor-pointer items-center justify-between px-5 py-4 text-left"
+        className="flex w-full cursor-pointer items-center justify-between px-5 py-4 text-left transition-colors hover:bg-zinc-800/60"
       >
         <span className="text-lg font-medium">
           {note.title}
@@ -67,7 +67,7 @@ export default function LessonNotes({
           type="button"
           onClick={() => setIsOpen((previous) => !previous)}
           aria-expanded={isOpen}
-          className="flex w-full cursor-pointer items-center justify-between px-6 py-5 text-left"
+          className="flex w-full cursor-pointer items-center justify-between px-6 py-5 text-left transition-colors hover:bg-zinc-900/70"
         >
           <div>
             <h2 className="text-2xl font-semibold">

@@ -45,3 +45,4 @@ export type Course = {
   level: string;
   modules: CourseModule[];
 };
+

@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { findLessonBySlug } from "@/lib/courses";
 import LatexContent from "@/components/lessons/LatexContent";
 import LessonNotes from "@/components/lessons/LessonNotes";
+import LessonTasks from "@/components/lessons/LessonTasks";
 
 type LessonPageProps = {
   params: Promise<{
@@ -47,7 +48,10 @@ export default async function LessonPage({
           Twoja przeglądarka nie obsługuje odtwarzania wideo.
         </video>
         <section className="mt-10 rounded-2xl border border-zinc-800 p-6">
+          
           <LessonNotes notes={lesson.notes} />
+
+          <LessonTasks tasks={lesson.tasks} />
         </section>
       </section>
               <a
