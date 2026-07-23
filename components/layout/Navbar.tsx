@@ -34,6 +34,7 @@ export default function Navbar() {
             <span className="block text-xl font-bold text-zinc-100">
               Kursy
             </span>
+
             <span className="mt-1 block text-xs font-medium uppercase tracking-[0.18em] text-blue-400">
               Edukacja
             </span>
@@ -43,28 +44,28 @@ export default function Navbar() {
         <div className="hidden items-center gap-8 text-sm text-zinc-300 md:flex">
           <Link
             href="/courses"
-            className="transition hover:text-white"
+            className="transition-colors hover:text-white"
           >
             Kursy
           </Link>
 
           <Link
-            href="/#o-platformie"
-            className="transition hover:text-white"
+            href="/about"
+            className="transition-colors hover:text-white"
           >
             O platformie
           </Link>
 
           <Link
-            href="/#dla-kogo"
-            className="transition hover:text-white"
+            href="/for-whom"
+            className="transition-colors hover:text-white"
           >
             Dla kogo?
           </Link>
 
           <Link
             href="/#kontakt"
-            className="transition hover:text-white"
+            className="transition-colors hover:text-white"
           >
             Kontakt
           </Link>
@@ -73,14 +74,14 @@ export default function Navbar() {
         <div className="flex items-center gap-3">
           <Link
             href="/login"
-            className="hidden rounded-xl px-4 py-2 text-sm font-medium text-zinc-300 transition hover:text-white sm:block"
+            className="hidden rounded-xl px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:text-white sm:block"
           >
             Zaloguj się
           </Link>
 
           <Link
             href="/register"
-            className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-blue-950/30 transition hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+            className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-blue-950/30 transition-colors hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
           >
             Zarejestruj się
           </Link>

@@ -1,5 +1,9 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+
+import Footer from "@/components/layout/Footer";
+import Navbar from "@/components/layout/Navbar";
+
 import "./globals.css";
 import "katex/dist/katex.min.css";
 
@@ -33,7 +37,11 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="flex min-h-full flex-col bg-[#020617] text-zinc-100">
-        {children}
+        <Navbar />
+
+        <div className="flex-1">{children}</div>
+
+        <Footer />
       </body>
     </html>
   );

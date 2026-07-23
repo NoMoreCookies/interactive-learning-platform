@@ -3,8 +3,7 @@
 import Image from "next/image";
 import { useState } from "react";
 
-import CourseCard from "@/components/CourseCard";
-import Navbar from "@/components/layout/Navbar";
+import CourseCard from "@/components/courses/CourseCard";
 import { courses } from "@/data/courses";
 
 type Subject = "mathematics" | "physics" | "computer-science";
@@ -114,7 +113,7 @@ export default function CoursesPage() {
 
   return (
     <>
-      <Navbar />
+      
 
       <main className="mx-auto min-h-screen max-w-6xl px-6 pb-20 pt-14">
         <div className="max-w-2xl">

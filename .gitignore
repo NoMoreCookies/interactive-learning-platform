@@ -1,44 +1,61 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
-# dependencies
-/node_modules
+# Dependencies
+/node_modules/
 /.pnp
 .pnp.*
+
+# Yarn
 .yarn/*
 !.yarn/patches
 !.yarn/plugins
 !.yarn/releases
 !.yarn/versions
 
-# testing
-/coverage
+# Testing
+/coverage/
 
-# next.js
+# Next.js
 /.next/
 /out/
 
-# production
-/build
+# Production build
+/build/
 
-# misc
-.DS_Store
-*.pem
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 
-# debug
+# Keep environment variable template in repository
+!.env.example
+
+# Course media not stored in GitHub
+/public/videos/
+/public/materials/private/
+
+# Logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-.pnpm-debug.log*
+pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
-
-# vercel
-.vercel
-
-# typescript
+# TypeScript
 *.tsbuildinfo
 next-env.d.ts
 
-#node_modules
-node_modules
+# Vercel
+/.vercel/
+
+# Editors
+/.vscode/
+/.idea/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Certificates and private keys
+*.pem
+*.key

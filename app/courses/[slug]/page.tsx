@@ -1,8 +1,8 @@
 import Image from "next/image";
-import Link from "next/link";
 import { notFound } from "next/navigation";
-import { findCourseBySlug } from "@/lib/courses";
+
 import CourseModuleAccordion from "@/components/courses/CourseModuleAccordion";
+import { findCourseBySlug } from "@/lib/courses";
 
 type CoursePageProps = {
   params: Promise<{
@@ -58,25 +58,21 @@ export default async function CoursePage({
         </div>
       </section>
 
-      <div className="mx-auto max-w-4xl px-6 pb-16 pt-6">
+      <section className="mx-auto max-w-4xl px-6 pb-16 pt-6">
         <div className="space-y-4">
           {course.modules.map((courseModule, moduleIndex) => (
-            <div className="space-y-4">
-              {course.modules.map((courseModule, moduleIndex) => (
-                <CourseModuleAccordion
-                  key={courseModule.id}
-                  courseSlug={course.slug}
-                  moduleNumber={courseModule.order}
-                  title={courseModule.title}
-                  description={courseModule.description}
-                  lessons={courseModule.lessons}
-                  defaultOpen={moduleIndex === 0}
-                />
-              ))}
-            </div>
+            <CourseModuleAccordion
+              key={courseModule.id}
+              courseSlug={course.slug}
+              moduleNumber={courseModule.order}
+              title={courseModule.title}
+              description={courseModule.description}
+              lessons={courseModule.lessons}
+              defaultOpen={moduleIndex === 0}
+            />
           ))}
         </div>
-      </div>
+      </section>
     </main>
   );
 }

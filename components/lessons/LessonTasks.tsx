@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { LessonTask } from "@/types/course";
 import LatexContent from "@/components/lessons/LatexContent";
+import Image from "next/image";
 
 type LessonTasksProps = {
   tasks: LessonTask[];
@@ -54,10 +55,12 @@ function TaskItem({
             </div>
 
             {task.imagePath && (
-              <img
-                src={task.imagePath}
-                alt={`Ilustracja do zadania ${taskNumber}`}
-                className="h-auto max-w-full rounded-xl"
+              <Image
+                  src={task.imagePath}
+                  alt={`Ilustracja do zadania ${taskNumber}`}
+                  width={800}
+                  height={500}
+                  className="h-auto w-full rounded-xl object-contain"
               />
             )}
 
