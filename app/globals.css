@@ -44,3 +44,42 @@ textarea,
   cursor: text;
 }
 
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: #020617;
+  color: #f4f4f5;
+}
+
+::selection {
+  background: rgba(37, 99, 235, 0.35);
+  color: #ffffff;
+}
+
+
+@keyframes course-card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-course-card {
+  opacity: 0;
+  animation: course-card-enter 420ms ease-out forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-course-card {
+    opacity: 1;
+    animation: none;
+  }
+}

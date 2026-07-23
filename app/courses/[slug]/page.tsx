@@ -1,6 +1,8 @@
+import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { findCourseBySlug } from "@/lib/courses";
+import CourseModuleAccordion from "@/components/courses/CourseModuleAccordion";
 
 type CoursePageProps = {
   params: Promise<{
@@ -19,61 +21,62 @@ export default async function CoursePage({
   }
 
   return (
-    <main className="mx-auto min-h-screen max-w-4xl px-6 py-16">
-      <p className="text-sm uppercase tracking-widest text-zinc-400">
-        {course.level}
-      </p>
+    <main className="min-h-screen">
+      <section className="relative overflow-hidden">
+        <div className="mx-auto grid min-h-[320px] max-w-7xl grid-cols-1 items-center px-6 py-10 lg:grid-cols-[1fr_1.5fr_1fr]">
+          <div className="hidden justify-start lg:flex">
+            <Image
+              src={course.illustrations.left}
+              alt=""
+              width={360}
+              height={360}
+              priority
+              className="h-auto w-full max-w-[340px] object-contain opacity-60"
+            />
+          </div>
 
-      <h1 className="mt-3 text-4xl font-bold">
-        {course.title}
-      </h1>
+          <div className="relative z-10 mx-auto max-w-2xl text-center">
+            <h1 className="text-4xl font-bold tracking-tight sm:text-5xl">
+              {course.title}
+            </h1>
 
-      <p className="mt-5 text-lg text-zinc-300">
-        {course.description}
-      </p>
+            <p className="mx-auto mt-6 max-w-xl text-lg leading-8 text-zinc-300">
+              {course.description}
+            </p>
+          </div>
 
-      <section className="mt-12">
-        <h2 className="text-2xl font-semibold">Lekcje</h2>
-
-        <div className="space-y-8">
-  {course.modules.map((courseModule) => (
-    <section key={courseModule.id}>
-      <h2 className="text-2xl font-semibold">
-        {courseModule.title}
-      </h2>
-
-      {courseModule.description && (
-        <p className="mt-2 text-zinc-400">
-          {courseModule.description}
-        </p>
-      )}
-
-              <div className="mt-4 space-y-3">
-                {courseModule.lessons.map((lesson, index) => (
-                  <Link
-                    key={lesson.id}
-                    href={`/courses/${course.slug}/${lesson.slug}`}
-                    className="block rounded-xl border border-zinc-800 p-5 transition hover:border-zinc-600"
-                  >
-                    <p className="text-sm text-zinc-500">
-                      Lekcja {lesson.order}
-                    </p>
-
-                    <h3 className="mt-1 text-xl font-medium">
-                      {lesson.title}
-                    </h3>
-
-                    <p className="mt-2 text-zinc-400">
-                      {lesson.description}
-                    </p>
-                  </Link>
-                ))}
-              </div>
-            </section>
-          ))}
+          <div className="hidden justify-end lg:flex">
+            <Image
+              src={course.illustrations.right}
+              alt=""
+              width={360}
+              height={360}
+              priority
+              className="h-auto w-full max-w-[340px] object-contain opacity-60"
+            />
+          </div>
         </div>
       </section>
 
+      <div className="mx-auto max-w-4xl px-6 pb-16 pt-6">
+        <div className="space-y-4">
+          {course.modules.map((courseModule, moduleIndex) => (
+            <div className="space-y-4">
+              {course.modules.map((courseModule, moduleIndex) => (
+                <CourseModuleAccordion
+                  key={courseModule.id}
+                  courseSlug={course.slug}
+                  moduleNumber={courseModule.order}
+                  title={courseModule.title}
+                  description={courseModule.description}
+                  lessons={courseModule.lessons}
+                  defaultOpen={moduleIndex === 0}
+                />
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
     </main>
   );
 }

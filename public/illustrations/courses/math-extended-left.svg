@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+<g fill="none" stroke="#BFC5CF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.9">
+<path d="M60 300H340"/>
+<path d="M120 340V60"/>
+<path d="M140 220 C170 320 250 320 290 140"/>
+<circle cx="290" cy="140" r="4" fill="#BFC5CF"/>
+<path d="M100 340l20-20m-20-20l20 20"/>
+<path d="M340 300l-20-10m20 10l-20 10"/>
+<text x="250" y="105" font-size="24" fill="#BFC5CF" stroke="none">y = x²</text>
+<text x="80" y="115" font-size="18" fill="#BFC5CF" stroke="none">y</text>
+<text x="315" y="325" font-size="18" fill="#BFC5CF" stroke="none">x</text>
+<text x="70" y="360" font-size="54" fill="#BFC5CF" stroke="none">∑</text>
+<text x="120" y="365" font-size="64" fill="#BFC5CF" stroke="none">∫</text>
+</g>
+</svg>

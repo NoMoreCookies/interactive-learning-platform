@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+<g fill="none" stroke="#BFC5CF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.9">
+<path d="M80 90l60-30 60 25v70l-60 30-60-25z"/>
+<path d="M140 60v70"/>
+<path d="M200 85l-60 45"/>
+<rect x="240" y="180" width="90" height="110"/>
+<line x1="285" y1="180" x2="285" y2="290"/>
+<path d="M80 300c30-30 70-30 100 0"/>
+<path d="M230 120c40 0 70-20 100-50"/>
+<path d="M220 240c45-10 70-35 95-70"/>
+<text x="252" y="210" font-size="18" fill="#BFC5CF" stroke="none">a₁₁</text>
+<text x="252" y="240" font-size="18" fill="#BFC5CF" stroke="none">a₂₁</text>
+<text x="252" y="270" font-size="18" fill="#BFC5CF" stroke="none">a₃₁</text>
+</g>
+</svg>

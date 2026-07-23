@@ -39,10 +39,18 @@ export type Course = {
   id: string;
   slug: string;
   title: string;
-  shortDescription: string;
   description: string;
-  subject: "mathematics" | "physics" | "computer-science";
-  level: string;
+  subject: string;
   modules: CourseModule[];
+  illustrations: {
+  left: string;
+  right: string;
+  };
+  
+};
+
+export type CourseIllustrations = {
+  left: string;
+  right: string;
 };
 

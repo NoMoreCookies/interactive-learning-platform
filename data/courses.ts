@@ -5,11 +5,13 @@ export const courses: Course[] = [
     id: "course-math-extended",
     slug: "matematyka-rozszerzona",
     title: "Matematyka rozszerzona",
-    shortDescription: "Kurs przygotowujący do matury rozszerzonej.",
+    subject: "mathematics",
     description:
       "Kompletny kurs matematyki rozszerzonej z teorią, zadaniami i rozwiązaniami.",
-    subject: "mathematics",
-    level: "Matura rozszerzona",
+    illustrations: {
+      left: "/illustrations/courses/math-extended-left.svg",
+      right: "/illustrations/courses/math-extended-right.svg",
+    },
 
     modules: [
       {

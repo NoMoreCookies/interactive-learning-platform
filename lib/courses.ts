@@ -30,3 +30,41 @@ export function findLessonBySlug(
 
   return undefined;
 }
+
+export function getLessonNavigation(
+  courseSlug: string,
+  lessonSlug: string
+) {
+  const course = findCourseBySlug(courseSlug);
+
+  if (!course) {
+    return undefined;
+  }
+
+  const allLessons = course.modules.flatMap(
+    (courseModule) => courseModule.lessons
+  );
+
+  const currentIndex = allLessons.findIndex(
+    (lesson) => lesson.slug === lessonSlug
+  );
+
+  if (currentIndex === -1) {
+    return undefined;
+  }
+
+  return {
+    previousLesson:
+      currentIndex > 0
+        ? allLessons[currentIndex - 1]
+        : undefined,
+
+    nextLesson:
+      currentIndex < allLessons.length - 1
+        ? allLessons[currentIndex + 1]
+        : undefined,
+
+    lessonNumber: currentIndex + 1,
+    totalLessons: allLessons.length,
+  };
+}
