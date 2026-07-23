@@ -18,17 +18,17 @@ const subjectOptions: SubjectOption[] = [
   {
     value: "mathematics",
     label: "Matematyka",
-    icon: "/categories/mathematics.svg",
+    icon: "/categories/mathematics-3d.png",
   },
   {
     value: "physics",
     label: "Fizyka",
-    icon: "/categories/physics.svg",
+    icon: "/categories/physics-3d.png",
   },
   {
     value: "computer-science",
     label: "Informatyka",
-    icon: "/categories/computer-science.svg",
+    icon: "/categories/computer-science-3d.png",
   },
 ];
 
@@ -149,19 +149,19 @@ export default function CoursesPage() {
                   setSelectedSubject(subject.value)
                 }
                 aria-pressed={isSelected}
-                className={`group h-[240px] w-[300px] shrink-0 rounded-2xl border p-7 text-left transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[#020617] ${getSubjectCardClasses(
-                  subject.value,
-                  isSelected
-                )}`}
+                            className={`group h-[300px] w-[320px] shrink-0 rounded-2xl border p-7 text-left transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[#020617] ${getSubjectCardClasses(
+                subject.value,
+                isSelected
+              )}`}
               >
                 <div className="flex h-full flex-col">
-                  <Image
-                    src={subject.icon}
-                    alt=""
-                    width={160}
-                    height={160}
-                    className="h-24 w-24 object-contain"
-                  />
+                <Image
+                  src={subject.icon}
+                  alt=""
+                  width={220}
+                  height={220}
+                  className="h-36 w-36 object-contain transition-transform duration-300 group-hover:scale-105"
+                />
 
                   <h2 className="mt-5 text-2xl font-semibold text-zinc-100">
                     {subject.label}
