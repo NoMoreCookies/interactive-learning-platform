@@ -1,3 +1,5 @@
-export default function Login() {
-    return <h1>Login</h1>;
+import { redirect } from "next/navigation";
+
+export default function LoginPage() {
+  redirect("/auth");
 }
