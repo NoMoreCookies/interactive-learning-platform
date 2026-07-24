@@ -52,20 +52,26 @@ export default function HomeHero() {
         </div>
 
         {/* PRAWA STRONA */}
-        <div className="relative flex items-center justify-center lg:justify-end">
+        <div className="relative flex min-h-[420px] items-center justify-center lg:justify-end">
           <div
             aria-hidden="true"
-            className="absolute bottom-8 h-24 w-2/3 rounded-full bg-blue-600/10 blur-3xl"
+            className="pointer-events-none absolute h-80 w-80 rounded-full bg-blue-600/15 blur-3xl"
           />
 
-          <Image
-            src="/landing/hero-teacher.png"
-            alt="Nauczyciel wyjaśniający matematykę i fizykę przy tablicy"
-            width={900}
-            height={700}
-            priority
-            className="fade-in fade-in-delay-3 relative h-auto w-full max-w-[760px] select-none object-contain"
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute bottom-8 h-24 w-2/3 rounded-full bg-blue-600/10 blur-3xl"
           />
+
+<Image
+  src="/hero/futuristic-book.png"
+  alt="Futurystyczna książka symbolizująca naukę matematyki, fizyki i informatyki"
+  width={800}
+  height={800}
+  priority
+  className="animate-book-float relative z-10 h-auto w-full max-w-[720px] select-none object-contain  lg:-translate-y-12
+  "
+/>
         </div>
       </div>
     </section>

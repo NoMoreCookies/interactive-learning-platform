@@ -120,3 +120,41 @@ body {
     animation: none;
   }
 }
+
+
+@keyframes book-float {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-1deg);
+  }
+
+  50% {
+    transform: translateY(-14px) rotate(1deg);
+  }
+}
+
+.animate-book-float {
+  animation: book-float 6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-book-float {
+    animation: none;
+  }
+}
+
+@keyframes book-float {
+  0%,
+  100% {
+    transform: translateY(0) rotateZ(-1deg) scale(1);
+  }
+
+  50% {
+    transform: translateY(-16px) rotateZ(1deg) scale(1.015);
+  }
+}
+
+.animate-book-float {
+  animation: book-float 7s ease-in-out infinite;
+  will-change: transform;
+}
