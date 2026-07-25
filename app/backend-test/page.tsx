@@ -1,11 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { generateClient } from "aws-amplify/data";
 
 import type { Schema } from "@/amplify/data/resource";
-
-const client = generateClient<Schema>();
+import { amplifyClient as client } from "@/lib/amplify-client";
 
 type Course = Schema["Course"]["type"];
 
@@ -14,6 +12,7 @@ export default function BackendTestPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isCreating, setIsCreating] = useState(false);
   const [message, setMessage] = useState("");
+  
 
   async function loadCourses() {
     setIsLoading(true);
@@ -42,52 +41,413 @@ export default function BackendTestPage() {
     }
   }
 
-  async function createTestCourse() {
+    async function createFullTestData() {
+    console.log("0. START createFullTestData");
+
     setIsCreating(true);
     setMessage("");
 
     try {
-      const existingCourse = courses.find(
-        (course) => course.slug === "matematyka-rozszerzona",
-      );
+        console.log("1. Szukam kursu");
 
-      if (existingCourse) {
-        setMessage("Kurs testowy już istnieje.");
+        const courseSearchResult =
+        await client.models.Course.list({
+            filter: {
+            slug: {
+                eq: "matematyka-rozszerzona",
+            },
+            },
+        });
+
+        console.log(
+        "2. Wynik wyszukiwania kursu:",
+        courseSearchResult,
+        );
+
+        if (courseSearchResult.errors?.length) {
+        console.error(
+            "Błąd sprawdzania kursu:",
+            courseSearchResult.errors,
+        );
+
+        setMessage(
+            "Nie udało się sprawdzić, czy kurs już istnieje.",
+        );
+
         return;
-      }
+        }
 
-      const { data, errors } = await client.models.Course.create({
-        title: "Matematyka rozszerzona",
-        slug: "matematyka-rozszerzona",
-        description:
-          "Kompleksowy kurs przygotowujący do matury rozszerzonej.",
-        subject: "MATHEMATICS",
-        level: "Matura rozszerzona",
-        thumbnailPath: "/images/matematyka.png",
-        order: 1,
-        published: true,
-      });
+        let course = courseSearchResult.data[0];
 
-      if (errors?.length) {
-        console.error("Błędy tworzenia kursu:", errors);
-        setMessage("Nie udało się utworzyć kursu.");
+        if (!course) {
+        console.log("3. Kurs nie istnieje — tworzę kurs");
+
+        const courseResult =
+            await client.models.Course.create({
+            title: "Matematyka rozszerzona",
+            slug: "matematyka-rozszerzona",
+            description:
+                "Kompleksowy kurs przygotowujący do matury rozszerzonej.",
+            subject: "MATHEMATICS",
+            level: "Matura rozszerzona",
+            thumbnailPath: "/images/matematyka.png",
+            order: 1,
+            published: true,
+            });
+
+        console.log(
+            "4. Wynik tworzenia kursu:",
+            courseResult,
+        );
+
+        if (
+            courseResult.errors?.length ||
+            !courseResult.data
+        ) {
+            console.error(
+            "Błąd tworzenia kursu:",
+            courseResult.errors,
+            );
+
+            setMessage("Nie udało się utworzyć kursu.");
+            return;
+        }
+
+        course = courseResult.data;
+        }
+
+        console.log("5. Kurs gotowy:", course);
+
+        console.log("6. Szukam modułu");
+
+        const moduleSearchResult =
+        await client.models.Module.list({
+            filter: {
+            courseId: {
+                eq: course.id,
+            },
+            slug: {
+                eq: "funkcje",
+            },
+            },
+        });
+
+        console.log(
+        "7. Wynik wyszukiwania modułu:",
+        moduleSearchResult,
+        );
+
+        if (moduleSearchResult.errors?.length) {
+        console.error(
+            "Błąd sprawdzania modułu:",
+            moduleSearchResult.errors,
+        );
+
+        setMessage(
+            "Nie udało się sprawdzić, czy moduł już istnieje.",
+        );
+
         return;
-      }
+        }
 
-      if (!data) {
-        setMessage("Backend nie zwrócił utworzonego kursu.");
+        let courseModule = moduleSearchResult.data[0];
+
+        if (!courseModule) {
+        console.log("8. Moduł nie istnieje — tworzę moduł");
+
+        const moduleResult =
+            await client.models.Module.create({
+            courseId: course.id,
+            title: "Funkcje",
+            slug: "funkcje",
+            description:
+                "Najważniejsze zagadnienia dotyczące funkcji.",
+            order: 1,
+            published: true,
+            });
+
+        console.log(
+            "9. Wynik tworzenia modułu:",
+            moduleResult,
+        );
+
+        if (
+            moduleResult.errors?.length ||
+            !moduleResult.data
+        ) {
+            console.error(
+            "Błąd tworzenia modułu:",
+            moduleResult.errors,
+            );
+
+            setMessage("Nie udało się utworzyć modułu.");
+            return;
+        }
+
+        courseModule = moduleResult.data;
+        }
+
+        console.log("10. Moduł gotowy:", courseModule);
+
+        console.log("11. Szukam lekcji");
+
+        const lessonSearchResult =
+        await client.models.Lesson.list({
+            filter: {
+            moduleId: {
+                eq: courseModule.id,
+            },
+            slug: {
+                eq: "funkcja-kwadratowa",
+            },
+            },
+        });
+
+        console.log(
+        "12. Wynik wyszukiwania lekcji:",
+        lessonSearchResult,
+        );
+
+        if (lessonSearchResult.errors?.length) {
+        console.error(
+            "Błąd sprawdzania lekcji:",
+            lessonSearchResult.errors,
+        );
+
+        setMessage(
+            "Nie udało się sprawdzić, czy lekcja już istnieje.",
+        );
+
         return;
-      }
+        }
 
-      setMessage("Kurs został poprawnie utworzony.");
-      await loadCourses();
+        let lesson = lessonSearchResult.data[0];
+
+        if (!lesson) {
+        console.log("13. Lekcja nie istnieje — tworzę lekcję");
+
+        const lessonResult =
+            await client.models.Lesson.create({
+            moduleId: courseModule.id,
+            title: "Funkcja kwadratowa",
+            slug: "funkcja-kwadratowa",
+            description:
+                "Wprowadzenie do funkcji kwadratowej i jej najważniejszych własności.",
+            durationMinutes: 28,
+            order: 1,
+            videoPath: "/videos/mat12.mp4",
+            materialsPath:
+                "/materials/funkcja-kwadratowa.zip",
+            published: true,
+            });
+
+        console.log(
+            "14. Wynik tworzenia lekcji:",
+            lessonResult,
+        );
+
+        if (
+            lessonResult.errors?.length ||
+            !lessonResult.data
+        ) {
+            console.error(
+            "Błąd tworzenia lekcji:",
+            lessonResult.errors,
+            );
+
+            setMessage("Nie udało się utworzyć lekcji.");
+            return;
+        }
+
+        lesson = lessonResult.data;
+        }
+
+        console.log("15. Lekcja gotowa:", lesson);
+
+        console.log("16. Szukam notatek");
+
+        const notesSearchResult =
+        await client.models.LessonNote.list({
+            filter: {
+            lessonId: {
+                eq: lesson.id,
+            },
+            },
+        });
+
+        console.log(
+        "17. Wynik wyszukiwania notatek:",
+        notesSearchResult,
+        );
+
+        if (notesSearchResult.errors?.length) {
+        console.error(
+            "Błąd sprawdzania notatek:",
+            notesSearchResult.errors,
+        );
+
+        setMessage(
+            "Nie udało się sprawdzić istniejących notatek.",
+        );
+
+        return;
+        }
+
+        const existingNoteTitles = new Set(
+        notesSearchResult.data.map((note) => note.title),
+        );
+
+        const noteRequests = [];
+
+        if (!existingNoteTitles.has("Postać ogólna")) {
+        console.log("18. Tworzę notatkę: Postać ogólna");
+
+        noteRequests.push(
+            client.models.LessonNote.create({
+            lessonId: lesson.id,
+            title: "Postać ogólna",
+            content:
+                "Funkcja kwadratowa ma postać: $$f(x)=ax^2+bx+c$$, gdzie $$a\\neq 0$$.",
+            order: 1,
+            }),
+        );
+        }
+
+        if (!existingNoteTitles.has("Delta")) {
+        console.log("19. Tworzę notatkę: Delta");
+
+        noteRequests.push(
+            client.models.LessonNote.create({
+            lessonId: lesson.id,
+            title: "Delta",
+            content:
+                "Wyróżnik trójmianu kwadratowego obliczamy ze wzoru: $$\\Delta=b^2-4ac$$.",
+            order: 2,
+            }),
+        );
+        }
+
+        const noteResults = await Promise.all(noteRequests);
+
+        console.log(
+        "20. Wyniki tworzenia notatek:",
+        noteResults,
+        );
+
+        const noteErrors = noteResults.flatMap(
+        (result) => result.errors ?? [],
+        );
+
+        if (noteErrors.length > 0) {
+        console.error(
+            "Błędy tworzenia notatek:",
+            noteErrors,
+        );
+
+        setMessage(
+            "Struktura została częściowo utworzona, ale wystąpił błąd przy notatkach.",
+        );
+
+        return;
+        }
+
+        console.log("21. Szukam zadań");
+
+        const tasksSearchResult =
+        await client.models.LessonTask.list({
+            filter: {
+            lessonId: {
+                eq: lesson.id,
+            },
+            },
+        });
+
+        console.log(
+        "22. Wynik wyszukiwania zadań:",
+        tasksSearchResult,
+        );
+
+        if (tasksSearchResult.errors?.length) {
+        console.error(
+            "Błąd sprawdzania zadań:",
+            tasksSearchResult.errors,
+        );
+
+        setMessage(
+            "Nie udało się sprawdzić istniejących zadań.",
+        );
+
+        return;
+        }
+
+        const taskAlreadyExists =
+        tasksSearchResult.data.some(
+            (task) => task.title === "Zadanie 1",
+        );
+
+        if (!taskAlreadyExists) {
+        console.log("23. Tworzę zadanie");
+
+        const taskResult =
+            await client.models.LessonTask.create({
+            lessonId: lesson.id,
+            title: "Zadanie 1",
+            content:
+                "Oblicz deltę funkcji $$f(x)=x^2-5x+6$$.",
+            answer: "$$\\Delta=1$$",
+            solution:
+                "$$a=1,\\ b=-5,\\ c=6$$, więc $$\\Delta=(-5)^2-4\\cdot1\\cdot6=1$$.",
+            order: 1,
+            });
+
+        console.log(
+            "24. Wynik tworzenia zadania:",
+            taskResult,
+        );
+
+        if (
+            taskResult.errors?.length ||
+            !taskResult.data
+        ) {
+            console.error(
+            "Błąd tworzenia zadania:",
+            taskResult.errors,
+            );
+
+            setMessage(
+            "Struktura została częściowo utworzona, ale wystąpił błąd przy zadaniu.",
+            );
+
+            return;
+        }
+        }
+
+        console.log("25. Odświeżam listę kursów");
+
+        await loadCourses();
+
+        /*
+        * Komunikat ustawiamy dopiero po loadCourses(),
+        * ponieważ loadCourses() na początku wykonuje setMessage("").
+        */
+        setMessage(
+        "Pełna struktura kursu została poprawnie utworzona.",
+        );
+
+        console.log("26. KONIEC — wszystkie dane są gotowe");
     } catch (error) {
-      console.error("Nieoczekiwany błąd:", error);
-      setMessage("Wystąpił nieoczekiwany błąd podczas tworzenia kursu.");
+        console.error(
+        "BŁĄD W createFullTestData:",
+        error,
+        );
+
+        setMessage(
+        "Wystąpił nieoczekiwany błąd podczas tworzenia danych.",
+        );
     } finally {
-      setIsCreating(false);
+        setIsCreating(false);
     }
-  }
+    }
 
   useEffect(() => {
     void loadCourses();
@@ -105,13 +465,13 @@ export default function BackendTestPage() {
 
       <button
         type="button"
-        onClick={createTestCourse}
+        onClick={createFullTestData}
         disabled={isCreating || isLoading}
         className="mt-8 rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
       >
-        {isCreating
-          ? "Tworzenie kursu..."
-          : "Utwórz kurs testowy"}
+    {isCreating
+    ? "Tworzenie struktury..."
+    : "Utwórz pełne dane testowe"}
       </button>
 
       {message && (

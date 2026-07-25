@@ -1,10 +1,14 @@
 import Link from "next/link";
-import type { Lesson } from "@/types/course";
+
+type NavigationLesson = {
+  slug: string;
+  title: string;
+};
 
 type LessonNavigationProps = {
   courseSlug: string;
-  previousLesson?: Lesson;
-  nextLesson?: Lesson;
+  previousLesson?: NavigationLesson | null;
+  nextLesson?: NavigationLesson | null;
 };
 
 export default function LessonNavigation({

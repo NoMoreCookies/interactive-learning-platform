@@ -1,9 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import type { LessonTask } from "@/types/course";
+
+import type { Schema } from "@/amplify/data/resource";
 import LatexContent from "@/components/lessons/LatexContent";
-import Image from "next/image";
+
+type LessonTask = Schema["LessonTask"]["type"];
 
 type LessonTasksProps = {
   tasks: LessonTask[];
@@ -19,14 +21,18 @@ function TaskItem({
   taskNumber,
 }: TaskItemProps) {
   const [isOpen, setIsOpen] = useState(false);
-  const [isAnswerOpen, setIsAnswerOpen] = useState(false);
-  const [isSolutionOpen, setIsSolutionOpen] = useState(false);
+  const [isAnswerOpen, setIsAnswerOpen] =
+    useState(false);
+  const [isSolutionOpen, setIsSolutionOpen] =
+    useState(false);
 
   return (
     <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/40">
       <button
         type="button"
-        onClick={() => setIsOpen((previous) => !previous)}
+        onClick={() =>
+          setIsOpen((previous) => !previous)
+        }
         aria-expanded={isOpen}
         className="flex w-full cursor-pointer items-center justify-between px-5 py-4 text-left transition-colors hover:bg-zinc-800/60"
       >
@@ -45,7 +51,9 @@ function TaskItem({
 
       <div
         className={`grid transition-[grid-template-rows] duration-500 ease-in-out ${
-          isOpen ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+          isOpen
+            ? "grid-rows-[1fr]"
+            : "grid-rows-[0fr]"
         }`}
       >
         <div className="overflow-hidden">
@@ -54,89 +62,95 @@ function TaskItem({
               <LatexContent content={task.content} />
             </div>
 
-            {task.imagePath && (
-              <Image
-                  src={task.imagePath}
-                  alt={`Ilustracja do zadania ${taskNumber}`}
-                  width={800}
-                  height={500}
-                  className="h-auto w-full rounded-xl object-contain"
-              />
+            {task.answer && (
+              <div className="overflow-hidden rounded-lg border border-zinc-700">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setIsAnswerOpen(
+                      (previous) => !previous,
+                    )
+                  }
+                  aria-expanded={isAnswerOpen}
+                  className="flex w-full cursor-pointer items-center justify-between px-4 py-3 text-left transition-colors hover:bg-zinc-800/60"
+                >
+                  <span className="font-medium">
+                    Pokaż odpowiedź
+                  </span>
+
+                  <span
+                    className={`text-lg transition-transform duration-500 ${
+                      isAnswerOpen
+                        ? "rotate-45"
+                        : "rotate-0"
+                    }`}
+                  >
+                    +
+                  </span>
+                </button>
+
+                <div
+                  className={`grid transition-[grid-template-rows] duration-500 ease-in-out ${
+                    isAnswerOpen
+                      ? "grid-rows-[1fr]"
+                      : "grid-rows-[0fr]"
+                  }`}
+                >
+                  <div className="overflow-hidden">
+                    <div className="border-t border-zinc-700 px-4 py-4 text-zinc-300">
+                      <LatexContent
+                        content={task.answer}
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
             )}
 
-            <div className="overflow-hidden rounded-lg border border-zinc-700">
-              <button
-                type="button"
-                onClick={() =>
-                  setIsAnswerOpen((previous) => !previous)
-                }
-                aria-expanded={isAnswerOpen}
-                className="flex w-full cursor-pointer items-center justify-between px-4 py-3 text-left transition-colors hover:bg-zinc-800/60"
-              >
-                <span className="font-medium">
-                  Pokaż odpowiedź
-                </span>
+            {task.solution && (
+              <div className="overflow-hidden rounded-lg border border-zinc-700">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setIsSolutionOpen(
+                      (previous) => !previous,
+                    )
+                  }
+                  aria-expanded={isSolutionOpen}
+                  className="flex w-full cursor-pointer items-center justify-between px-4 py-3 text-left transition-colors hover:bg-zinc-800/60"
+                >
+                  <span className="font-medium">
+                    Pokaż rozwiązanie
+                  </span>
 
-                <span
-                  className={`text-lg transition-transform duration-500 ${
-                    isAnswerOpen ? "rotate-45" : "rotate-0"
+                  <span
+                    className={`text-lg transition-transform duration-500 ${
+                      isSolutionOpen
+                        ? "rotate-45"
+                        : "rotate-0"
+                    }`}
+                  >
+                    +
+                  </span>
+                </button>
+
+                <div
+                  className={`grid transition-[grid-template-rows] duration-500 ease-in-out ${
+                    isSolutionOpen
+                      ? "grid-rows-[1fr]"
+                      : "grid-rows-[0fr]"
                   }`}
                 >
-                  +
-                </span>
-              </button>
-
-              <div
-                className={`grid transition-[grid-template-rows] duration-500 ease-in-out ${
-                  isAnswerOpen
-                    ? "grid-rows-[1fr]"
-                    : "grid-rows-[0fr]"
-                }`}
-              >
-                <div className="overflow-hidden">
-                  <div className="border-t border-zinc-700 px-4 py-4 text-zinc-300">
-                    <LatexContent content={task.answer} />
+                  <div className="overflow-hidden">
+                    <div className="border-t border-zinc-700 px-4 py-4 text-zinc-300">
+                      <LatexContent
+                        content={task.solution}
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-
-            <div className="overflow-hidden rounded-lg border border-zinc-700">
-              <button
-                type="button"
-                onClick={() =>
-                  setIsSolutionOpen((previous) => !previous)
-                }
-                aria-expanded={isSolutionOpen}
-                className="flex w-full cursor-pointer items-center justify-between px-4 py-3 text-left transition-colors hover:bg-zinc-800/60"
-              >
-                <span className="font-medium">
-                  Pokaż rozwiązanie
-                </span>
-
-                <span
-                  className={`text-lg transition-transform duration-500 ${
-                    isSolutionOpen ? "rotate-45" : "rotate-0"
-                  }`}
-                >
-                  +
-                </span>
-              </button>
-
-              <div
-                className={`grid transition-[grid-template-rows] duration-500 ease-in-out ${
-                  isSolutionOpen
-                    ? "grid-rows-[1fr]"
-                    : "grid-rows-[0fr]"
-                }`}
-              >
-                <div className="overflow-hidden">
-                  <div className="border-t border-zinc-700 px-4 py-4 text-zinc-300">
-                    <LatexContent content={task.solution} />
-                  </div>
-                </div>
-              </div>
-            </div>
+            )}
           </div>
         </div>
       </div>
@@ -158,7 +172,9 @@ export default function LessonTasks({
       <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950">
         <button
           type="button"
-          onClick={() => setIsOpen((previous) => !previous)}
+          onClick={() =>
+            setIsOpen((previous) => !previous)
+          }
           aria-expanded={isOpen}
           className="flex w-full cursor-pointer items-center justify-between px-6 py-5 text-left transition-colors hover:bg-zinc-900/70"
         >
@@ -168,7 +184,8 @@ export default function LessonTasks({
             </h2>
 
             <p className="mt-1 text-sm text-zinc-400">
-              Sprawdź wiedzę i zobacz pełne rozwiązania
+              Sprawdź wiedzę i zobacz pełne
+              rozwiązania
             </p>
           </div>
 
@@ -183,7 +200,9 @@ export default function LessonTasks({
 
         <div
           className={`grid transition-[grid-template-rows] duration-500 ease-in-out ${
-            isOpen ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+            isOpen
+              ? "grid-rows-[1fr]"
+              : "grid-rows-[0fr]"
           }`}
         >
           <div className="overflow-hidden">

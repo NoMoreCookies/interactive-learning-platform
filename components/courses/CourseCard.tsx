@@ -1,21 +1,27 @@
 import Link from "next/link";
-import type { Course } from "@/types/course";
+
+import type { Schema } from "@/amplify/data/resource";
+
+type Course = Schema["Course"]["type"];
 
 type CourseCardProps = {
   course: Course;
 };
 
-export default function CourseCard({ course }: CourseCardProps) {
+export default function CourseCard({
+  course,
+}: CourseCardProps) {
   return (
     <article className="rounded-2xl border border-zinc-800 bg-zinc-950 p-6">
-
       <h2 className="mt-2 text-2xl font-semibold">
         {course.title}
       </h2>
 
-      <p className="mt-3 text-zinc-300">
-        {course.description}
-      </p>
+      {course.description && (
+        <p className="mt-3 text-zinc-300">
+          {course.description}
+        </p>
+      )}
 
       <Link
         href={`/courses/${course.slug}`}

@@ -1,8 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import type { LessonNote } from "@/types/course";
+
+import type { Schema } from "@/amplify/data/resource";
 import LatexContent from "@/components/lessons/LatexContent";
+
+type LessonNote = Schema["LessonNote"]["type"];
 
 type LessonNotesProps = {
   notes: LessonNote[];

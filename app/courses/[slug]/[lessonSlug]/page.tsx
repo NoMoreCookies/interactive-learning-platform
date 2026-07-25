@@ -1,12 +1,11 @@
-import { notFound } from "next/navigation";
+"use client";
+
+import { use, useEffect, useState } from "react";
 
 import LessonNavigation from "@/components/lessons/LessonNavigation";
 import LessonNotes from "@/components/lessons/LessonNotes";
 import LessonTasks from "@/components/lessons/LessonTasks";
-import {
-  findLessonBySlug,
-  getLessonNavigation,
-} from "@/lib/courses";
+import { getLessonPageData } from "@/lib/data/lesson-service";
 
 type LessonPageProps = {
   params: Promise<{
@@ -15,27 +14,102 @@ type LessonPageProps = {
   }>;
 };
 
-export default async function LessonPage({
+type LessonPageData = NonNullable<
+  Awaited<ReturnType<typeof getLessonPageData>>
+>;
+
+export default function LessonPage({
   params,
 }: LessonPageProps) {
-  const { slug, lessonSlug } = await params;
+  const { slug, lessonSlug } = use(params);
 
-  const result = findLessonBySlug(slug, lessonSlug);
+  const [pageData, setPageData] =
+    useState<LessonPageData | null>(null);
 
-  if (!result) {
-    notFound();
+  const [isLoading, setIsLoading] =
+    useState(true);
+
+  const [errorMessage, setErrorMessage] =
+    useState("");
+
+  useEffect(() => {
+    async function loadLesson() {
+      setIsLoading(true);
+      setErrorMessage("");
+
+      try {
+        console.log(
+          "Pobieram lekcję z AWS:",
+          lessonSlug,
+        );
+
+        const result = await getLessonPageData(
+          slug,
+          lessonSlug,
+        );
+
+        console.log(
+          "Dane strony lekcji:",
+          result,
+        );
+
+        if (!result) {
+          setErrorMessage(
+            "Nie znaleziono takiej lekcji.",
+          );
+
+          return;
+        }
+
+        setPageData(result);
+      } catch (error) {
+        console.error(
+          "Błąd pobierania lekcji:",
+          error,
+        );
+
+        setErrorMessage(
+          "Nie udało się pobrać lekcji.",
+        );
+      } finally {
+        setIsLoading(false);
+      }
+    }
+
+    void loadLesson();
+  }, [slug, lessonSlug]);
+
+  if (isLoading) {
+    return (
+      <main className="mx-auto min-h-screen max-w-5xl px-6 py-20">
+        <p className="text-zinc-400">
+          Pobieranie lekcji...
+        </p>
+      </main>
+    );
   }
 
-  const { course, courseModule, lesson } = result;
+  if (errorMessage || !pageData) {
+    return (
+      <main className="mx-auto min-h-screen max-w-5xl px-6 py-20">
+        <h1 className="text-3xl font-bold">
+          Nie znaleziono lekcji
+        </h1>
 
-  const navigation = getLessonNavigation(
-    course.slug,
-    lesson.slug
-  );
-
-  if (!navigation) {
-    notFound();
+        <p className="mt-4 text-zinc-400">
+          {errorMessage ||
+            "Wybrana lekcja nie istnieje."}
+        </p>
+      </main>
+    );
   }
+
+  const {
+    course,
+    courseModule,
+    lesson,
+    navigation,
+  } = pageData;
 
   return (
     <main className="mx-auto min-h-screen max-w-5xl px-6 py-12">
@@ -58,30 +132,37 @@ export default async function LessonPage({
             Moduł: {courseModule.title}
           </span>
 
-          <span>
-            {lesson.durationMinutes} min
-          </span>
+          {lesson.durationMinutes != null && (
+            <span>
+              {lesson.durationMinutes} min
+            </span>
+          )}
         </div>
 
-        <p className="mt-4 text-lg text-zinc-300">
-          {lesson.description}
-        </p>
+        {lesson.description && (
+          <p className="mt-4 text-lg text-zinc-300">
+            {lesson.description}
+          </p>
+        )}
       </header>
 
-      <section className="mt-10">
-        <video
-          controls
-          preload="metadata"
-          className="w-full rounded-2xl bg-black"
-        >
-          <source
-            src={lesson.videoPath}
-            type="video/mp4"
-          />
+      {lesson.videoPath && (
+        <section className="mt-10">
+          <video
+            controls
+            preload="metadata"
+            className="w-full rounded-2xl bg-black"
+          >
+            <source
+              src={lesson.videoPath}
+              type="video/mp4"
+            />
 
-          Twoja przeglądarka nie obsługuje odtwarzania wideo.
-        </video>
-      </section>
+            Twoja przeglądarka nie obsługuje
+            odtwarzania wideo.
+          </video>
+        </section>
+      )}
 
       <section className="mt-10 rounded-2xl border border-zinc-800 p-6">
         <LessonNotes notes={lesson.notes} />
@@ -89,64 +170,40 @@ export default async function LessonPage({
         <LessonTasks tasks={lesson.tasks} />
       </section>
 
-    {lesson.materialsPath && (
-      <section className="mt-10 flex justify-center">
-        <a
-          href={lesson.materialsPath}
-          download
-          className="
-            group
-            flex
-            w-full
-            max-w-md
-            cursor-pointer
-            items-center
-            justify-center
-            gap-3
-            rounded-2xl
-            border-2
-            border-white
-            bg-zinc-950
-            px-6
-            py-5
-            text-center
-            text-lg
-            font-medium
-            text-white
-            transition-all
-            duration-200
-            hover:bg-zinc-900
-            hover:shadow-[0_0_24px_rgba(255,255,255,0.10)]
-            focus-visible:outline-none
-            focus-visible:ring-2
-            focus-visible:ring-white
-            focus-visible:ring-offset-2
-            focus-visible:ring-offset-black
-          "
-        >
-          <svg
-            aria-hidden="true"
-            viewBox="0 0 24 24"
-            fill="none"
-            className="h-6 w-6 transition-transform duration-200 group-hover:translate-y-0.5"
+      {lesson.materialsPath && (
+        <section className="mt-10 flex justify-center">
+          <a
+            href={lesson.materialsPath}
+            download
+            className="group flex w-full max-w-md cursor-pointer items-center justify-center gap-3 rounded-2xl border-2 border-white bg-zinc-950 px-6 py-5 text-center text-lg font-medium text-white transition-all duration-200 hover:bg-zinc-900 hover:shadow-[0_0_24px_rgba(255,255,255,0.10)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-black"
           >
-            <path
-              d="M12 3v12m0 0 5-5m-5 5-5-5M5 17v3h14v-3"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 24 24"
+              fill="none"
+              className="h-6 w-6 transition-transform duration-200 group-hover:translate-y-0.5"
+            >
+              <path
+                d="M12 3v12m0 0 5-5m-5 5-5-5M5 17v3h14v-3"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
 
-          <span>Pobierz materiały z lekcji</span>
-        </a>
-      </section>
-    )}
+            <span>
+              Pobierz materiały z lekcji
+            </span>
+          </a>
+        </section>
+      )}
 
       <LessonNavigation
         courseSlug={course.slug}
-        previousLesson={navigation.previousLesson}
+        previousLesson={
+          navigation.previousLesson
+        }
         nextLesson={navigation.nextLesson}
       />
     </main>

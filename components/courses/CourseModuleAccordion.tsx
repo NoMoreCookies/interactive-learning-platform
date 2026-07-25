@@ -3,19 +3,15 @@
 import Link from "next/link";
 import { useState } from "react";
 
-type Lesson = {
-  id: string;
-  slug: string;
-  order: number;
-  title: string;
-  description: string;
-};
+import type { Schema } from "@/amplify/data/resource";
+
+type Lesson = Schema["Lesson"]["type"];
 
 type CourseModuleAccordionProps = {
   courseSlug: string;
   moduleNumber: number;
   title: string;
-  description?: string;
+  description?: string | null;
   lessons: Lesson[];
   defaultOpen?: boolean;
 };
@@ -58,7 +54,8 @@ export default function CourseModuleAccordion({
 
         <div className="flex shrink-0 items-center gap-4">
           <span className="hidden text-sm text-zinc-500 sm:block">
-            {lessons.length} {lessons.length === 1 ? "lekcja" : "lekcje"}
+            {lessons.length}{" "}
+            {lessons.length === 1 ? "lekcja" : "lekcje"}
           </span>
 
           <svg
@@ -105,9 +102,11 @@ export default function CourseModuleAccordion({
                   {lesson.title}
                 </h3>
 
-                <p className="mt-2 text-sm leading-6 text-zinc-400">
-                  {lesson.description}
-                </p>
+                {lesson.description && (
+                  <p className="mt-2 text-sm leading-6 text-zinc-400">
+                    {lesson.description}
+                  </p>
+                )}
               </Link>
             ))}
           </div>

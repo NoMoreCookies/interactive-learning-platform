@@ -4,9 +4,15 @@ import Image from "next/image";
 import { useRef, useState } from "react";
 
 import CourseCard from "@/components/courses/CourseCard";
-import { courses } from "@/data/courses";
+import { useEffect } from "react";
 
-type Subject = "mathematics" | "physics" | "computer-science";
+import { getPublishedCourses } from "@/lib/data/course-service";
+import type { Schema } from "@/amplify/data/resource";
+
+type Subject =
+  | "MATHEMATICS"
+  | "PHYSICS"
+  | "COMPUTER_SCIENCE";
 
 type SubjectOption = {
   value: Subject;
@@ -14,19 +20,21 @@ type SubjectOption = {
   icon: string;
 };
 
+type Course = Schema["Course"]["type"];
+
 const subjectOptions: SubjectOption[] = [
   {
-    value: "mathematics",
+    value: "MATHEMATICS",
     label: "Matematyka",
     icon: "/categories/mathematics-3d.png",
   },
   {
-    value: "physics",
+    value: "PHYSICS",
     label: "Fizyka",
     icon: "/categories/physics-3d.png",
   },
   {
-    value: "computer-science",
+    value: "COMPUTER_SCIENCE",
     label: "Informatyka",
     icon: "/categories/computer-science-3d.png",
   },
@@ -47,7 +55,7 @@ function getSubjectCardClasses(
   }
 
   switch (subject) {
-    case "mathematics":
+    case "MATHEMATICS":
       return [
         "border-blue-500",
         "bg-blue-500/10",
@@ -55,7 +63,7 @@ function getSubjectCardClasses(
         "shadow-blue-950/30",
       ].join(" ");
 
-    case "physics":
+    case "PHYSICS":
       return [
         "border-amber-500",
         "bg-amber-500/10",
@@ -63,7 +71,7 @@ function getSubjectCardClasses(
         "shadow-amber-950/20",
       ].join(" ");
 
-    case "computer-science":
+    case "COMPUTER_SCIENCE":
       return [
         "border-emerald-500",
         "bg-emerald-500/10",
@@ -75,33 +83,64 @@ function getSubjectCardClasses(
 
 function getSubjectTextClass(subject: Subject): string {
   switch (subject) {
-    case "mathematics":
+    case "MATHEMATICS":
       return "text-blue-400";
 
-    case "physics":
+    case "PHYSICS":
       return "text-amber-400";
 
-    case "computer-science":
+    case "COMPUTER_SCIENCE":
       return "text-emerald-400";
   }
 }
 
 function getSubjectBorderClass(subject: Subject): string {
   switch (subject) {
-    case "mathematics":
+    case "MATHEMATICS":
       return "border-blue-500";
 
-    case "physics":
+    case "PHYSICS":
       return "border-amber-500";
 
-    case "computer-science":
+    case "COMPUTER_SCIENCE":
       return "border-emerald-500";
   }
 }
 
 export default function CoursesPage() {
   const [selectedSubject, setSelectedSubject] =
-    useState<Subject>("mathematics");
+    useState<Subject>("MATHEMATICS");
+
+  const [courses, setCourses] = useState<Course[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState("");
+
+  useEffect(() => {
+    async function loadCourses() {
+      setIsLoading(true);
+      setErrorMessage("");
+
+      try {
+        console.log("=== Pobieram kursy z AWS ===");
+
+        const result = await getPublishedCourses();
+
+        console.log("=== Wynik z AWS ===");
+        console.log(result);
+
+        setCourses(result);
+      } catch (error) {
+        console.error("=== BŁĄD ===");
+        console.error(error);
+
+        setErrorMessage("Nie udało się pobrać kursów.");
+      } finally {
+        setIsLoading(false);
+      }
+    }
+
+    void loadCourses();
+  }, []);
   
   const coursesSectionRef = useRef<HTMLElement>(null);
 
@@ -134,7 +173,21 @@ export default function CoursesPage() {
       });
     }, 25);
   }
+  if (isLoading) {
+    return (
+      <main className="mx-auto max-w-6xl px-6 py-20">
+        <p>Pobieranie kursów...</p>
+      </main>
+    );
+  }
 
+  if (errorMessage) {
+    return (
+      <main className="mx-auto max-w-6xl px-6 py-20">
+        <p className="text-red-400">{errorMessage}</p>
+      </main>
+    );
+  }
   return (
     <>
       
