@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import CourseCard from "@/components/courses/CourseCard";
 import { courses } from "@/data/courses";
@@ -102,6 +102,8 @@ function getSubjectBorderClass(subject: Subject): string {
 export default function CoursesPage() {
   const [selectedSubject, setSelectedSubject] =
     useState<Subject>("mathematics");
+  
+  const coursesSectionRef = useRef<HTMLElement>(null);
 
   const filteredCourses = courses.filter(
     (course) => course.subject === selectedSubject
@@ -110,6 +112,28 @@ export default function CoursesPage() {
   const selectedSubjectLabel = subjectOptions.find(
     (subject) => subject.value === selectedSubject
   )?.label;
+
+  function handleSubjectSelect(subject: Subject) {
+  setSelectedSubject(subject);
+
+  setTimeout(() => {
+    const section = coursesSectionRef.current;
+
+    if (!section) return;
+
+    const offset = 80;
+
+    const y =
+      section.getBoundingClientRect().top +
+      window.scrollY -
+      offset;
+
+    window.scrollTo({
+      top: y,
+      behavior: "smooth",
+      });
+    }, 25);
+  }
 
   return (
     <>
@@ -146,7 +170,7 @@ export default function CoursesPage() {
                 key={subject.value}
                 type="button"
                 onClick={() =>
-                  setSelectedSubject(subject.value)
+                  handleSubjectSelect(subject.value)
                 }
                 aria-pressed={isSelected}
                             className={`group h-[300px] w-[320px] shrink-0 rounded-2xl border p-7 text-left transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[#020617] ${getSubjectCardClasses(
@@ -191,7 +215,10 @@ export default function CoursesPage() {
           })}
         </div>
 
-        <section className="mt-14">
+        <section
+            ref={coursesSectionRef}
+            className="mt-14"
+          >
           <div className="mb-6 flex items-end justify-between gap-6">
             <div>
               <p className="text-sm uppercase tracking-widest text-zinc-500">

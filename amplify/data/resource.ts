@@ -1,17 +1,104 @@
-import { type ClientSchema, a, defineData } from '@aws-amplify/backend';
+import { type ClientSchema, a, defineData } from "@aws-amplify/backend";
 
-/*== STEP 1 ===============================================================
-The section below creates a Todo database table with a "content" field. Try
-adding a new "isDone" field as a boolean. The authorization rule below
-specifies that any unauthenticated user can "create", "read", "update", 
-and "delete" any "Todo" records.
-=========================================================================*/
 const schema = a.schema({
-  Todo: a
+  Course: a
     .model({
-      content: a.string(),
+      title: a.string().required(),
+      slug: a.string().required(),
+      description: a.string(),
+      subject: a.enum([
+      "MATHEMATICS",
+      "PHYSICS",
+      "COMPUTER_SCIENCE",
+      ]),
+      level: a.string(),
+      thumbnailPath: a.string(),
+      order: a.integer().required(),
+      published: a.boolean().default(false),
+
+      modules: a.hasMany("Module", "courseId"),
     })
-    .authorization((allow) => [allow.guest()]),
+    .authorization((allow) => [
+      allow.authenticated(),
+    ]),
+
+  Module: a
+    .model({
+      courseId: a.id().required(),
+
+      title: a.string().required(),
+      slug: a.string().required(),
+      description: a.string(),
+      order: a.integer().required(),
+      published: a.boolean().default(false),
+
+      course: a.belongsTo("Course", "courseId"),
+      lessons: a.hasMany("Lesson", "moduleId"),
+    })
+    .authorization((allow) => [
+      allow.authenticated(),
+    ]),
+
+  Lesson: a
+    .model({
+      moduleId: a.id().required(),
+
+      title: a.string().required(),
+      slug: a.string().required(),
+      description: a.string(),
+
+      durationMinutes: a.integer(),
+
+      order: a.integer().required(),
+
+      videoPath: a.string(),
+      materialsPath: a.string(),
+
+      published: a.boolean().default(false),
+
+      module: a.belongsTo("Module", "moduleId"),
+
+      notes: a.hasMany("LessonNote", "lessonId"),
+      tasks: a.hasMany("LessonTask", "lessonId"),
+    })
+    .authorization((allow) => [
+      allow.authenticated(),
+    ]),
+
+  LessonNote: a
+    .model({
+      lessonId: a.id().required(),
+
+      title: a.string().required(),
+      content: a.string().required(),
+
+      order: a.integer().required(),
+
+      lesson: a.belongsTo("Lesson", "lessonId"),
+    })
+    .authorization((allow) => [
+      allow.authenticated(),
+    ]),
+
+  LessonTask: a
+    .model({
+      lessonId: a.id().required(),
+
+      title: a.string().required(),
+
+      content: a.string().required(),
+
+      answer: a.string(),
+
+      solution: a.string(),
+
+      order: a.integer().required(),
+
+      lesson: a.belongsTo("Lesson", "lessonId"),
+    })
+    .authorization((allow) => [
+      allow.authenticated(),
+    ]),
 });
 
 export type Schema = ClientSchema<typeof schema>;
@@ -19,35 +106,6 @@ export type Schema = ClientSchema<typeof schema>;
 export const data = defineData({
   schema,
   authorizationModes: {
-    defaultAuthorizationMode: 'identityPool',
+    defaultAuthorizationMode: "userPool",
   },
 });
-
-/*== STEP 2 ===============================================================
-Go to your frontend source code. From your client-side code, generate a
-Data client to make CRUDL requests to your table. (THIS SNIPPET WILL ONLY
-WORK IN THE FRONTEND CODE FILE.)
-
-Using JavaScript or Next.js React Server Components, Middleware, Server 
-Actions or Pages Router? Review how to generate Data clients for those use
-cases: https://docs.amplify.aws/gen2/build-a-backend/data/connect-to-API/
-=========================================================================*/
-
-/*
-"use client"
-import { generateClient } from "aws-amplify/data";
-import type { Schema } from "@/amplify/data/resource";
-
-const client = generateClient<Schema>() // use this Data client for CRUDL requests
-*/
-
-/*== STEP 3 ===============================================================
-Fetch records from the database and use them in your frontend component.
-(THIS SNIPPET WILL ONLY WORK IN THE FRONTEND CODE FILE.)
-=========================================================================*/
-
-/* For example, in a React component, you can use this snippet in your
-  function's RETURN statement */
-// const { data: todos } = await client.models.Todo.list()
-
-// return <ul>{todos.map(todo => <li key={todo.id}>{todo.content}</li>)}</ul>
