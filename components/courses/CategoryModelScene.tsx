@@ -13,12 +13,16 @@ type CategoryModelSceneProps = {
   modelPath: string;
   scale?: number;
   cameraPosition?: [number, number, number];
+  rotationSpeed?: number;
+  position?: [number, number, number];
 };
 
 export default function CategoryModelScene({
   modelPath,
   scale = 1,
   cameraPosition = [0, 0, 5],
+  rotationSpeed = 0.05,
+  position = [0, 0, 0],
 }: CategoryModelSceneProps) {
   return (
     <Canvas
@@ -53,11 +57,12 @@ export default function CategoryModelScene({
           enabled={false}
           global={false}
         >
-          <CategoryModel
-            modelPath={modelPath}
-            scale={scale}
-            rotationSpeed={0.07}
-          />
+        <CategoryModel
+        modelPath={modelPath}
+        scale={scale}
+        rotationSpeed={rotationSpeed}
+        position={position}
+        />
         </PresentationControls>
       </Float>
 

@@ -9,12 +9,14 @@ type CategoryModelProps = {
   modelPath: string;
   scale?: number;
   rotationSpeed?: number;
+  position?: [number, number, number];
 };
 
 export default function CategoryModel({
   modelPath,
   scale = 1,
   rotationSpeed = 0.08,
+  position = [0, 0, 0],
 }: CategoryModelProps) {
   const groupRef = useRef<Group>(null);
   const { scene } = useGLTF(modelPath);
@@ -44,10 +46,12 @@ export default function CategoryModel({
   });
 
   return (
-    <group ref={groupRef} scale={scale}>
-      <Center>
-        <primitive object={scene} />
-      </Center>
-    </group>
+        <group
+        ref={groupRef}
+        scale={scale}
+        position={position}
+        >
+            <primitive object={scene} />
+        </group>
   );
 }

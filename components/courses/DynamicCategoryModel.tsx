@@ -14,6 +14,8 @@ type DynamicCategoryModelProps = {
   modelPath: string;
   scale?: number;
   cameraPosition?: [number, number, number];
+  rotationSpeed?: number;
+  position?: [number, number, number];
 };
 
 export default function DynamicCategoryModel(

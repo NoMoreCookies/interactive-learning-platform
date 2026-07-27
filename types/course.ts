@@ -1,3 +1,12 @@
+export type CourseSubject =
+  | "MATHEMATICS"
+  | "PHYSICS"
+  | "COMPUTER_SCIENCE";
+
+export type CourseLevel =
+  | "BASIC"
+  | "EXTENDED";
+
 export type LessonNote = {
   id: string;
   title: string;
@@ -35,22 +44,19 @@ export type CourseModule = {
   lessons: Lesson[];
 };
 
-export type Course = {
-  id: string;
-  slug: string;
-  title: string;
-  description: string;
-  subject: string;
-  modules: CourseModule[];
-  illustrations: {
-  left: string;
-  right: string;
-  };
-  
-};
-
 export type CourseIllustrations = {
   left: string;
   right: string;
 };
 
+export type Course = {
+  id: string;
+  slug: string;
+  title: string;
+  description: string;
+  subject: CourseSubject;
+  level?: CourseLevel;
+  thumbnailPath?: string;
+  modules: CourseModule[];
+  illustrations?: CourseIllustrations;
+};

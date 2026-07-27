@@ -1,13 +1,19 @@
 "use client";
 
 import Image from "next/image";
-import { useRef, useState } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+
+import type { Schema } from "@/amplify/data/resource";
 
 import CourseCard from "@/components/courses/CourseCard";
-import { useEffect } from "react";
+import DynamicCategoryModel from "@/components/courses/DynamicCategoryModel";
 
+import { categoryModels } from "@/lib/config/category-models";
 import { getPublishedCourses } from "@/lib/services/course-service";
-import type { Schema } from "@/amplify/data/resource";
 
 type Subject =
   | "MATHEMATICS"
@@ -42,15 +48,15 @@ const subjectOptions: SubjectOption[] = [
 
 function getSubjectCardClasses(
   subject: Subject,
-  isSelected: boolean
+  isSelected: boolean,
 ): string {
   if (!isSelected) {
     return [
       "border-zinc-800",
-      "bg-zinc-950/30",
+      "bg-zinc-950/80",
       "hover:-translate-y-1",
       "hover:border-zinc-600",
-      "hover:bg-zinc-900/40",
+      "hover:bg-zinc-900/90",
     ].join(" ");
   }
 
@@ -81,7 +87,9 @@ function getSubjectCardClasses(
   }
 }
 
-function getSubjectTextClass(subject: Subject): string {
+function getSubjectTextClass(
+  subject: Subject,
+): string {
   switch (subject) {
     case "MATHEMATICS":
       return "text-blue-400";
@@ -94,7 +102,9 @@ function getSubjectTextClass(subject: Subject): string {
   }
 }
 
-function getSubjectBorderClass(subject: Subject): string {
+function getSubjectBorderClass(
+  subject: Subject,
+): string {
   switch (subject) {
     case "MATHEMATICS":
       return "border-blue-500";
@@ -111,9 +121,17 @@ export default function CoursesPage() {
   const [selectedSubject, setSelectedSubject] =
     useState<Subject>("MATHEMATICS");
 
-  const [courses, setCourses] = useState<Course[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [errorMessage, setErrorMessage] = useState("");
+  const [courses, setCourses] =
+    useState<Course[]>([]);
+
+  const [isLoading, setIsLoading] =
+    useState(true);
+
+  const [errorMessage, setErrorMessage] =
+    useState("");
+
+  const coursesSectionRef =
+    useRef<HTMLElement>(null);
 
   useEffect(() => {
     async function loadCourses() {
@@ -121,19 +139,19 @@ export default function CoursesPage() {
       setErrorMessage("");
 
       try {
-        console.log("=== Pobieram kursy z AWS ===");
-
-        const result = await getPublishedCourses();
-
-        console.log("=== Wynik z AWS ===");
-        console.log(result);
+        const result =
+          await getPublishedCourses();
 
         setCourses(result);
       } catch (error) {
-        console.error("=== BŁĄD ===");
-        console.error(error);
+        console.error(
+          "Nie udało się pobrać kursów:",
+          error,
+        );
 
-        setErrorMessage("Nie udało się pobrać kursów.");
+        setErrorMessage(
+          "Nie udało się pobrać kursów.",
+        );
       } finally {
         setIsLoading(false);
       }
@@ -141,42 +159,54 @@ export default function CoursesPage() {
 
     void loadCourses();
   }, []);
-  
-  const coursesSectionRef = useRef<HTMLElement>(null);
 
   const filteredCourses = courses.filter(
-    (course) => course.subject === selectedSubject
+    (course) =>
+      course.subject === selectedSubject,
   );
 
-  const selectedSubjectLabel = subjectOptions.find(
-    (subject) => subject.value === selectedSubject
-  )?.label;
+  const selectedSubjectLabel =
+    subjectOptions.find(
+      (subject) =>
+        subject.value === selectedSubject,
+    )?.label ?? "";
 
-  function handleSubjectSelect(subject: Subject) {
-  setSelectedSubject(subject);
+  const activeModel =
+    categoryModels[selectedSubject];
 
-  setTimeout(() => {
-    const section = coursesSectionRef.current;
+  function handleSubjectSelect(
+    subject: Subject,
+  ) {
+    setSelectedSubject(subject);
 
-    if (!section) return;
+    window.setTimeout(() => {
+      const section =
+        coursesSectionRef.current;
 
-    const offset = 80;
+      if (!section) {
+        return;
+      }
 
-    const y =
-      section.getBoundingClientRect().top +
-      window.scrollY -
-      offset;
+      const offset = 80;
 
-    window.scrollTo({
-      top: y,
-      behavior: "smooth",
+      const scrollPosition =
+        section.getBoundingClientRect().top +
+        window.scrollY -
+        offset;
+
+      window.scrollTo({
+        top: scrollPosition,
+        behavior: "smooth",
       });
     }, 25);
   }
+
   if (isLoading) {
     return (
       <main className="mx-auto max-w-6xl px-6 py-20">
-        <p>Pobieranie kursów...</p>
+        <p className="text-zinc-400">
+          Pobieranie kursów...
+        </p>
       </main>
     );
   }
@@ -184,54 +214,61 @@ export default function CoursesPage() {
   if (errorMessage) {
     return (
       <main className="mx-auto max-w-6xl px-6 py-20">
-        <p className="text-red-400">{errorMessage}</p>
+        <p className="text-red-400">
+          {errorMessage}
+        </p>
       </main>
     );
   }
+
   return (
-    <>
-      
+    <main className="relative isolate mx-auto min-h-screen max-w-6xl overflow-visible px-6 pb-20 pt-14">
+      {/* Nagłówek strony */}
+      <div className="relative z-20 max-w-2xl">
+        <p className="text-sm font-medium uppercase tracking-widest text-blue-400">
+          Wszystkie kursy
+        </p>
 
-      <main className="mx-auto min-h-screen max-w-6xl px-6 pb-20 pt-14">
-        <div className="max-w-2xl">
-          <p className="text-sm font-medium uppercase tracking-widest text-blue-400">
-            Wszystkie kursy
-          </p>
+        <h1 className="mt-3 text-4xl font-bold tracking-tight sm:text-5xl">
+          Wybierz kategorię
+        </h1>
 
-          <h1 className="mt-3 text-4xl font-bold tracking-tight sm:text-5xl">
-            Wybierz kategorię
-          </h1>
+        <p className="mt-4 text-lg leading-8 text-zinc-400">
+          Matematyka, fizyka i informatyka
+          w jednym miejscu.
+        </p>
+      </div>
 
-          <p className="mt-4 text-lg leading-8 text-zinc-400">
-            Matematyka, fizyka i informatyka w jednym miejscu.
-          </p>
-        </div>
+      {/* Kafelki kategorii */}
+      <div className="relative z-20 mt-12 flex gap-6 overflow-x-auto pb-4">
+        {subjectOptions.map((subject) => {
+          const isSelected =
+            selectedSubject === subject.value;
 
-        <div className="mt-12 flex gap-6 overflow-x-auto pb-4">
-          {subjectOptions.map((subject) => {
-            const isSelected =
-              selectedSubject === subject.value;
+          const subjectColor =
+            getSubjectTextClass(subject.value);
 
-            const subjectColor =
-              getSubjectTextClass(subject.value);
+          const subjectBorder =
+            getSubjectBorderClass(
+              subject.value,
+            );
 
-            const subjectBorder =
-              getSubjectBorderClass(subject.value);
-
-            return (
-              <button
-                key={subject.value}
-                type="button"
-                onClick={() =>
-                  handleSubjectSelect(subject.value)
-                }
-                aria-pressed={isSelected}
-                            className={`group h-[300px] w-[320px] shrink-0 rounded-2xl border p-7 text-left transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[#020617] ${getSubjectCardClasses(
+          return (
+            <button
+              key={subject.value}
+              type="button"
+              aria-pressed={isSelected}
+              onClick={() =>
+                handleSubjectSelect(
+                  subject.value,
+                )
+              }
+              className={`group h-[300px] w-[320px] shrink-0 rounded-2xl border p-7 text-left transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#020617] ${getSubjectCardClasses(
                 subject.value,
-                isSelected
+                isSelected,
               )}`}
-              >
-                <div className="flex h-full flex-col">
+            >
+              <div className="flex h-full flex-col">
                 <Image
                   src={subject.icon}
                   alt=""
@@ -240,38 +277,71 @@ export default function CoursesPage() {
                   className="h-36 w-36 object-contain transition-transform duration-300 group-hover:scale-105"
                 />
 
-                  <h2 className="mt-5 text-2xl font-semibold text-zinc-100">
-                    {subject.label}
-                  </h2>
+                <h2 className="mt-5 text-2xl font-semibold text-zinc-100">
+                  {subject.label}
+                </h2>
 
-                  <span
-                    className={`mt-auto flex h-10 w-10 items-center justify-center rounded-full border ${subjectBorder} ${subjectColor} transition-transform duration-300 group-hover:translate-y-1`}
+                <span
+                  className={`mt-auto flex h-10 w-10 items-center justify-center rounded-full border ${subjectBorder} ${subjectColor} transition-transform duration-300 group-hover:translate-y-1`}
+                >
+                  <svg
+                    aria-hidden="true"
+                    viewBox="0 0 24 24"
+                    className="h-5 w-5"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
                   >
-                    <svg
-                      aria-hidden="true"
-                      viewBox="0 0 24 24"
-                      className="h-5 w-5"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                    >
-                      <path
-                        d="M12 5v14m-6-6 6 6 6-6"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
-                  </span>
-                </div>
-              </button>
-            );
-          })}
+                    <path
+                      d="M12 5v14m-6-6 6 6 6-6"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </span>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Sekcja kursów i model 3D */}
+      <section
+        ref={coursesSectionRef}
+        className="relative z-0 mt-14 min-h-[620px] overflow-visible"
+      >
+        {/* Model 3D — warstwa tła */}
+        <div
+          key={selectedSubject}
+          aria-hidden="true"
+          className="
+            pointer-events-none
+            absolute
+            right-[-60%]
+            top-[44%]
+            z-0
+            hidden
+            h-[800px]
+            w-[1500px]
+            animate-category-model-enter
+            xl:block
+          "
+        >
+          <DynamicCategoryModel
+            modelPath={activeModel.path}
+            scale={activeModel.scale}
+            cameraPosition={
+              activeModel.cameraPosition
+            }
+            rotationSpeed={
+              activeModel.rotationSpeed
+            }
+            position={activeModel.position}
+          />
         </div>
 
-        <section
-            ref={coursesSectionRef}
-            className="mt-14"
-          >
+        {/* Treść ponad modelem */}
+        <div className="relative z-10 max-w-3xl">
           <div className="mb-6 flex items-end justify-between gap-6">
             <div>
               <p className="text-sm uppercase tracking-widest text-zinc-500">
@@ -280,7 +350,7 @@ export default function CoursesPage() {
 
               <h2
                 className={`mt-2 text-2xl font-semibold ${getSubjectTextClass(
-                  selectedSubject
+                  selectedSubject,
                 )}`}
               >
                 {selectedSubjectLabel}
@@ -297,30 +367,37 @@ export default function CoursesPage() {
 
           <div
             key={selectedSubject}
-            className="grid gap-6 md:grid-cols-2 lg:grid-cols-3"
+            className="grid gap-6 md:grid-cols-2"
           >
             {filteredCourses.length > 0 ? (
-              filteredCourses.map((course, index) => (
-                <div
-                  key={course.id}
-                  className="animate-course-card"
-                  style={{
-                    animationDelay: `${index * 80}ms`,
-                  }}
-                >
-                  <CourseCard course={course} />
-                </div>
-              ))
+              filteredCourses.map(
+                (course, index) => (
+                  <div
+                    key={course.id}
+                    className="animate-course-card"
+                    style={{
+                      animationDelay: `${
+                        index * 80
+                      }ms`,
+                    }}
+                  >
+                    <CourseCard
+                      course={course}
+                    />
+                  </div>
+                ),
+              )
             ) : (
-              <div className="animate-course-card col-span-full rounded-2xl border border-zinc-800 bg-zinc-950/30 p-10 text-center">
+              <div className="animate-course-card col-span-full rounded-2xl border border-zinc-800 bg-[#020617]/90 p-10 text-center backdrop-blur-sm">
                 <p className="text-zinc-400">
-                  W tej kategorii nie ma jeszcze dostępnych kursów.
+                  W tej kategorii nie ma
+                  jeszcze dostępnych kursów.
                 </p>
               </div>
             )}
           </div>
-        </section>
-      </main>
-    </>
+        </div>
+      </section>
+    </main>
   );
 }
