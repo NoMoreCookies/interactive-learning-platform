@@ -4,7 +4,7 @@ import Image from "next/image";
 import { use, useEffect, useState } from "react";
 
 import CourseModuleAccordion from "@/components/courses/CourseModuleAccordion";
-import { getCourseStructure } from "@/lib/data/course-service";
+import { getCourseStructure } from "@/lib/services/course-service";
 
 type CoursePageProps = {
   params: Promise<{

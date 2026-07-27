@@ -8,6 +8,8 @@ import ConfigureAmplify from "@/components/ConfigureAmplify";
 import "./globals.css";
 import "katex/dist/katex.min.css";
 
+import AuthProvider from "@/components/auth/AuthProvider";
+
 const geistSans = Geist({
   variable: "--font-geist-sans",
   subsets: ["latin"],
@@ -38,13 +40,15 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="flex min-h-full flex-col bg-[#020617] text-zinc-100">
-        <ConfigureAmplify />
+      <ConfigureAmplify />
 
+      <AuthProvider>
         <Navbar />
 
         <main className="flex-1">
           {children}
         </main>
+      </AuthProvider>
 
         <Footer />
       </body>

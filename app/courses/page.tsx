@@ -6,7 +6,7 @@ import { useRef, useState } from "react";
 import CourseCard from "@/components/courses/CourseCard";
 import { useEffect } from "react";
 
-import { getPublishedCourses } from "@/lib/data/course-service";
+import { getPublishedCourses } from "@/lib/services/course-service";
 import type { Schema } from "@/amplify/data/resource";
 
 type Subject =

@@ -5,7 +5,8 @@ import { use, useEffect, useState } from "react";
 import LessonNavigation from "@/components/lessons/LessonNavigation";
 import LessonNotes from "@/components/lessons/LessonNotes";
 import LessonTasks from "@/components/lessons/LessonTasks";
-import { getLessonPageData } from "@/lib/data/lesson-service";
+import { getLessonPageData } from "@/lib/services/lesson-service";
+import { getFileUrl } from "@/lib/services/storage-service";
 
 type LessonPageProps = {
   params: Promise<{
@@ -31,6 +32,21 @@ export default function LessonPage({
 
   const [errorMessage, setErrorMessage] =
     useState("");
+
+  const [isDownloadingMaterials, setIsDownloadingMaterials] =
+    useState(false);
+
+  const [materialsError, setMaterialsError] =
+    useState("");
+
+  const [videoUrl, setVideoUrl] =
+    useState("");
+
+  const [videoError, setVideoError] =
+    useState("");
+
+  const [isVideoLoading, setIsVideoLoading] =
+    useState(false);
 
   useEffect(() => {
     async function loadLesson() {
@@ -78,6 +94,88 @@ export default function LessonPage({
 
     void loadLesson();
   }, [slug, lessonSlug]);
+
+  useEffect(() => {
+  async function loadVideoUrl() {
+    const videoPath =
+      pageData?.lesson.videoPath;
+
+    if (!videoPath) {
+      setVideoUrl("");
+      return;
+    }
+
+    setIsVideoLoading(true);
+    setVideoError("");
+
+    try {
+      console.log("Ścieżka filmu:", videoPath);
+      const url = await getFileUrl(
+        videoPath,
+        3600,
+      );
+
+      setVideoUrl(url);
+    } catch (error) {
+      console.error(
+        "Błąd pobierania URL filmu:",
+        error,
+      );
+
+      setVideoError(
+        "Nie udało się załadować filmu.",
+      );
+    } finally {
+      setIsVideoLoading(false);
+    }
+  }
+
+  void loadVideoUrl();
+}, [pageData?.lesson.videoPath]);
+
+  async function handleDownloadMaterials() {
+  const materialsPath =
+    pageData?.lesson.materialsPath;
+
+  if (!materialsPath) {
+    setMaterialsError(
+      "Ta lekcja nie ma przypisanych materiałów.",
+    );
+    return;
+  }
+
+  setIsDownloadingMaterials(true);
+  setMaterialsError("");
+
+  try {
+    const url = await getFileUrl(
+      materialsPath,
+      300,
+    );
+
+    const link =
+      document.createElement("a");
+
+    link.href = url;
+    link.download = "";
+    link.rel = "noreferrer";
+
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  } catch (error) {
+    console.error(
+      "Błąd pobierania materiałów:",
+      error,
+    );
+
+    setMaterialsError(
+      "Nie udało się pobrać materiałów.",
+    );
+  } finally {
+    setIsDownloadingMaterials(false);
+  }
+}
 
   if (isLoading) {
     return (
@@ -146,23 +244,40 @@ export default function LessonPage({
         )}
       </header>
 
-      {lesson.videoPath && (
-        <section className="mt-10">
+    {lesson.videoPath && (
+      <section className="mt-10">
+        {isVideoLoading && (
+          <div className="flex aspect-video items-center justify-center rounded-2xl bg-black">
+            <p className="text-zinc-400">
+              Ładowanie filmu...
+            </p>
+          </div>
+        )}
+
+        {!isVideoLoading && videoUrl && (
           <video
+            key={videoUrl}
             controls
             preload="metadata"
-            className="w-full rounded-2xl bg-black"
+            className="aspect-video w-full rounded-2xl bg-black"
           >
             <source
-              src={lesson.videoPath}
+              src={videoUrl}
               type="video/mp4"
             />
 
             Twoja przeglądarka nie obsługuje
             odtwarzania wideo.
           </video>
-        </section>
-      )}
+        )}
+
+        {videoError && (
+          <p className="rounded-xl border border-red-500/40 bg-red-500/10 p-4 text-red-300">
+            {videoError}
+          </p>
+        )}
+      </section>
+    )}
 
       <section className="mt-10 rounded-2xl border border-zinc-800 p-6">
         <LessonNotes notes={lesson.notes} />
@@ -171,33 +286,44 @@ export default function LessonPage({
       </section>
 
       {lesson.materialsPath && (
-        <section className="mt-10 flex justify-center">
-          <a
-            href={lesson.materialsPath}
-            download
-            className="group flex w-full max-w-md cursor-pointer items-center justify-center gap-3 rounded-2xl border-2 border-white bg-zinc-950 px-6 py-5 text-center text-lg font-medium text-white transition-all duration-200 hover:bg-zinc-900 hover:shadow-[0_0_24px_rgba(255,255,255,0.10)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-black"
-          >
-            <svg
-              aria-hidden="true"
-              viewBox="0 0 24 24"
-              fill="none"
-              className="h-6 w-6 transition-transform duration-200 group-hover:translate-y-0.5"
-            >
-              <path
-                d="M12 3v12m0 0 5-5m-5 5-5-5M5 17v3h14v-3"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
+  <section className="mt-10">
+    <div className="flex justify-center">
+      <button
+        type="button"
+        onClick={handleDownloadMaterials}
+        disabled={isDownloadingMaterials}
+        className="group flex w-full max-w-md cursor-pointer items-center justify-center gap-3 rounded-2xl border-2 border-white bg-zinc-950 px-6 py-5 text-center text-lg font-medium text-white transition-all duration-200 hover:bg-zinc-900 hover:shadow-[0_0_24px_rgba(255,255,255,0.10)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-black disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <svg
+          aria-hidden="true"
+          viewBox="0 0 24 24"
+          fill="none"
+          className="h-6 w-6 transition-transform duration-200 group-hover:translate-y-0.5"
+        >
+          <path
+            d="M12 3v12m0 0 5-5m-5 5-5-5M5 17v3h14v-3"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
 
-            <span>
-              Pobierz materiały z lekcji
-            </span>
-          </a>
-        </section>
-      )}
+        <span>
+          {isDownloadingMaterials
+            ? "Przygotowywanie pliku..."
+            : "Pobierz materiały z lekcji"}
+        </span>
+      </button>
+    </div>
+
+    {materialsError && (
+      <p className="mt-4 text-center text-sm text-red-400">
+        {materialsError}
+      </p>
+    )}
+  </section>
+)}
 
       <LessonNavigation
         courseSlug={course.slug}

@@ -11,16 +11,20 @@ const schema = a.schema({
       "PHYSICS",
       "COMPUTER_SCIENCE",
       ]),
-      level: a.string(),
+      level: a.enum([
+      "BASIC",
+      "EXTENDED",
+      ]),
       thumbnailPath: a.string(),
       order: a.integer().required(),
       published: a.boolean().default(false),
 
       modules: a.hasMany("Module", "courseId"),
     })
-    .authorization((allow) => [
-      allow.authenticated(),
-    ]),
+  .authorization((allow) => [
+    allow.group("ADMIN"),
+    allow.authenticated().to(["read"]),
+  ]),
 
   Module: a
     .model({
@@ -35,9 +39,10 @@ const schema = a.schema({
       course: a.belongsTo("Course", "courseId"),
       lessons: a.hasMany("Lesson", "moduleId"),
     })
-    .authorization((allow) => [
-      allow.authenticated(),
-    ]),
+  .authorization((allow) => [
+    allow.group("ADMIN"),
+    allow.authenticated().to(["read"]),
+  ]),
 
   Lesson: a
     .model({
@@ -62,7 +67,8 @@ const schema = a.schema({
       tasks: a.hasMany("LessonTask", "lessonId"),
     })
     .authorization((allow) => [
-      allow.authenticated(),
+      allow.group("ADMIN"),
+      allow.authenticated().to(["read"]),
     ]),
 
   LessonNote: a
@@ -77,7 +83,8 @@ const schema = a.schema({
       lesson: a.belongsTo("Lesson", "lessonId"),
     })
     .authorization((allow) => [
-      allow.authenticated(),
+      allow.group("ADMIN"),
+      allow.authenticated().to(["read"]),
     ]),
 
   LessonTask: a
@@ -97,7 +104,8 @@ const schema = a.schema({
       lesson: a.belongsTo("Lesson", "lessonId"),
     })
     .authorization((allow) => [
-      allow.authenticated(),
+      allow.group("ADMIN"),
+      allow.authenticated().to(["read"]),
     ]),
 });
 

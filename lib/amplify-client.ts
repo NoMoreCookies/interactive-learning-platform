@@ -1,11 +1,8 @@
-import { Amplify } from "aws-amplify";
+import "@/lib/amplify-config";
+
 import { generateClient } from "aws-amplify/data";
 
-import outputs from "@/amplify_outputs.json";
 import type { Schema } from "@/amplify/data/resource";
 
-Amplify.configure(outputs, {
-  ssr: true,
-});
-
-export const amplifyClient = generateClient<Schema>();
+export const amplifyClient =
+  generateClient<Schema>();

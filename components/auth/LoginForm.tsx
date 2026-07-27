@@ -1,8 +1,12 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
-import { signIn } from "aws-amplify/auth";
+import {
+  fetchAuthSession,
+  signIn,
+} from "aws-amplify/auth";
+import { useAuth } from "@/components/auth/AuthProvider";
 
 type LoginFormProps = {
   defaultEmail?: string;
@@ -14,6 +18,7 @@ export default function LoginForm({
   onRegisterClick,
 }: LoginFormProps) {
   const router = useRouter();
+  const { refreshAuth } = useAuth();
 
   const [email, setEmail] = useState(defaultEmail);
   const [password, setPassword] = useState("");
@@ -22,11 +27,6 @@ export default function LoginForm({
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
-  useEffect(() => {
-    if (defaultEmail) {
-      setEmail(defaultEmail);
-    }
-  }, [defaultEmail]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -40,11 +40,31 @@ export default function LoginForm({
         password,
       });
 
-      if (result.isSignedIn) {
-        router.push("/account");
-        router.refresh();
-        return;
-      }
+    if (result.isSignedIn) {
+      await refreshAuth();
+
+      const session = await fetchAuthSession();
+
+      const rawGroups =
+        session.tokens?.accessToken.payload[
+          "cognito:groups"
+        ];
+
+      const groups = Array.isArray(rawGroups)
+        ? rawGroups
+        : [];
+
+      const isAdmin =
+        groups.includes("ADMIN");
+
+      router.push(
+        isAdmin ? "/admin" : "/account",
+      );
+
+      router.refresh();
+
+      return;
+}
 
       setError("Logowanie wymaga wykonania dodatkowego kroku.");
     } catch (error) {
