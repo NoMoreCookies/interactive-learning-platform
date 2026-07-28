@@ -9,16 +9,12 @@ import {
 
 import type { Schema } from "@/amplify/data/resource";
 
+import CategoryBackground from "@/components/courses/CategoryBackground";
 import CourseCard from "@/components/courses/CourseCard";
-import DynamicCategoryModel from "@/components/courses/DynamicCategoryModel";
 
-import { categoryModels } from "@/lib/config/category-models";
+import type { Subject } from "@/lib/config/category-backgrounds";
+
 import { getPublishedCourses } from "@/lib/services/course-service";
-
-type Subject =
-  | "MATHEMATICS"
-  | "PHYSICS"
-  | "COMPUTER_SCIENCE";
 
 type SubjectOption = {
   value: Subject;
@@ -171,12 +167,13 @@ export default function CoursesPage() {
         subject.value === selectedSubject,
     )?.label ?? "";
 
-  const activeModel =
-    categoryModels[selectedSubject];
-
   function handleSubjectSelect(
     subject: Subject,
   ) {
+    if (subject === selectedSubject) {
+      return;
+    }
+
     setSelectedSubject(subject);
 
     window.setTimeout(() => {
@@ -223,7 +220,6 @@ export default function CoursesPage() {
 
   return (
     <main className="relative isolate mx-auto min-h-screen max-w-6xl overflow-visible px-6 pb-20 pt-14">
-      {/* Nagłówek strony */}
       <div className="relative z-20 max-w-2xl">
         <p className="text-sm font-medium uppercase tracking-widest text-blue-400">
           Wszystkie kursy
@@ -239,7 +235,6 @@ export default function CoursesPage() {
         </p>
       </div>
 
-      {/* Kafelki kategorii */}
       <div className="relative z-20 mt-12 flex gap-6 overflow-x-auto pb-4">
         {subjectOptions.map((subject) => {
           const isSelected =
@@ -268,7 +263,9 @@ export default function CoursesPage() {
                 isSelected,
               )}`}
             >
+            
               <div className="flex h-full flex-col">
+
                 <Image
                   src={subject.icon}
                   alt=""
@@ -276,6 +273,7 @@ export default function CoursesPage() {
                   height={220}
                   className="h-36 w-36 object-contain transition-transform duration-300 group-hover:scale-105"
                 />
+
 
                 <h2 className="mt-5 text-2xl font-semibold text-zinc-100">
                   {subject.label}
@@ -305,42 +303,14 @@ export default function CoursesPage() {
         })}
       </div>
 
-      {/* Sekcja kursów i model 3D */}
       <section
         ref={coursesSectionRef}
         className="relative z-0 mt-14 min-h-[620px] overflow-visible"
       >
-        {/* Model 3D — warstwa tła */}
-        <div
-          key={selectedSubject}
-          aria-hidden="true"
-          className="
-            pointer-events-none
-            absolute
-            right-[-60%]
-            top-[44%]
-            z-0
-            hidden
-            h-[800px]
-            w-[1500px]
-            animate-category-model-enter
-            xl:block
-          "
-        >
-          <DynamicCategoryModel
-            modelPath={activeModel.path}
-            scale={activeModel.scale}
-            cameraPosition={
-              activeModel.cameraPosition
-            }
-            rotationSpeed={
-              activeModel.rotationSpeed
-            }
-            position={activeModel.position}
-          />
-        </div>
+        <CategoryBackground
+          subject={selectedSubject}
+        />
 
-        {/* Treść ponad modelem */}
         <div className="relative z-10 max-w-3xl">
           <div className="mb-6 flex items-end justify-between gap-6">
             <div>
