@@ -15,13 +15,11 @@ import {
 } from "@/lib/services/storage-service";
 
 type LessonAssetUploaderProps = {
+  lessonId: string;
   courseSlug: string;
   lessonSlug: string;
-
   assetType: "video" | "materials";
-
-  currentPath?: string | null;
-
+  currentPath: string | null | undefined;
   onPathSaved: (
     path: string,
   ) => Promise<unknown>;
@@ -32,6 +30,7 @@ type LessonAssetUploaderProps = {
 };
 
 export default function LessonAssetUploader({
+  lessonId,
   courseSlug,
   lessonSlug,
   assetType,
