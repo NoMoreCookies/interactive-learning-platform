@@ -1,12 +1,24 @@
 "use client";
 
-import { FormEvent, useState } from "react";
-import { useRouter } from "next/navigation";
+import {
+  type FormEvent,
+  useState,
+} from "react";
+
 import {
   fetchAuthSession,
   signIn,
 } from "aws-amplify/auth";
+
+import { useRouter } from "next/navigation";
+
 import { useAuth } from "@/components/auth/AuthProvider";
+import {
+  Button,
+  FormField,
+  Input,
+  StatusMessage,
+} from "@/components/ui";
 
 type LoginFormProps = {
   defaultEmail?: string;
@@ -20,15 +32,26 @@ export default function LoginForm({
   const router = useRouter();
   const { refreshAuth } = useAuth();
 
-  const [email, setEmail] = useState(defaultEmail);
-  const [password, setPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
+  const [email, setEmail] =
+    useState(defaultEmail);
 
-  const [error, setError] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
+  const [password, setPassword] =
+    useState("");
 
+  const [
+    showPassword,
+    setShowPassword,
+  ] = useState(false);
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  const [error, setError] =
+    useState("");
+
+  const [isLoading, setIsLoading] =
+    useState(false);
+
+  async function handleSubmit(
+    event: FormEvent<HTMLFormElement>,
+  ) {
     event.preventDefault();
 
     setError("");
@@ -36,39 +59,52 @@ export default function LoginForm({
 
     try {
       const result = await signIn({
-        username: email.trim().toLowerCase(),
+        username:
+          email.trim().toLowerCase(),
         password,
       });
 
-    if (result.isSignedIn) {
+      if (!result.isSignedIn) {
+        setError(
+          "Logowanie wymaga wykonania dodatkowego kroku.",
+        );
+        return;
+      }
+
       await refreshAuth();
 
-      const session = await fetchAuthSession();
+      const session =
+        await fetchAuthSession();
 
       const rawGroups =
         session.tokens?.accessToken.payload[
           "cognito:groups"
         ];
 
-      const groups = Array.isArray(rawGroups)
-        ? rawGroups
+      const groups = Array.isArray(
+        rawGroups,
+      )
+        ? rawGroups.filter(
+            (
+              group,
+            ): group is string =>
+              typeof group === "string",
+          )
         : [];
 
-      const isAdmin =
-        groups.includes("ADMIN");
-
       router.push(
-        isAdmin ? "/admin" : "/account",
+        groups.includes("ADMIN")
+          ? "/admin"
+          : "/account",
       );
 
       router.refresh();
-
-      return;
-}
-
-      setError("Logowanie wymaga wykonania dodatkowego kroku.");
-    } catch (error) {
-      setError(getLoginErrorMessage(error));
+    } catch (caughtError) {
+      setError(
+        getLoginErrorMessage(
+          caughtError,
+        ),
+      );
     } finally {
       setIsLoading(false);
     }
@@ -77,100 +113,109 @@ export default function LoginForm({
   return (
     <div>
       <div className="mb-8">
-        <h1 className="text-3xl font-bold tracking-tight text-white">
-          Witaj ponownie! 👋
+        <h1 className="text-3xl font-bold tracking-tight text-zinc-100">
+          Witaj ponownie
         </h1>
 
-        <p className="mt-2 text-sm leading-6 text-slate-400">
-          Zaloguj się, aby kontynuować naukę.
+        <p className="mt-2 text-sm leading-6 text-zinc-400">
+          Zaloguj się, aby kontynuować
+          naukę.
         </p>
       </div>
 
-      <form onSubmit={handleSubmit} className="space-y-5">
-        <div>
-          <label
-            htmlFor="login-email"
-            className="text-sm font-medium text-slate-300"
-          >
-            Adres e-mail
-          </label>
-
-          <input
+      <form
+        onSubmit={handleSubmit}
+        className="space-y-5"
+      >
+        <FormField
+          htmlFor="login-email"
+          label="Adres e-mail"
+        >
+          <Input
             id="login-email"
             type="email"
             autoComplete="email"
             value={email}
-            onChange={(event) => setEmail(event.target.value)}
+            onChange={(event) =>
+              setEmail(event.target.value)
+            }
             placeholder="Wpisz swój e-mail"
             required
-            className={inputClassName}
+            disabled={isLoading}
           />
-        </div>
+        </FormField>
 
-        <div>
-          <div className="flex items-center justify-between gap-4">
-            <label
-              htmlFor="login-password"
-              className="text-sm font-medium text-slate-300"
-            >
-              Hasło
-            </label>
-
-            <button
-              type="button"
-              className="text-xs font-semibold text-blue-400 transition-colors hover:text-blue-300"
-            >
-              Nie pamiętasz hasła?
-            </button>
-          </div>
-
+        <FormField
+          htmlFor="login-password"
+          label="Hasło"
+        >
           <div className="relative">
-            <input
+            <Input
               id="login-password"
-              type={showPassword ? "text" : "password"}
+              type={
+                showPassword
+                  ? "text"
+                  : "password"
+              }
               autoComplete="current-password"
               value={password}
-              onChange={(event) => setPassword(event.target.value)}
+              onChange={(event) =>
+                setPassword(
+                  event.target.value,
+                )
+              }
               placeholder="Wpisz swoje hasło"
               required
-              className={`${inputClassName} pr-20`}
+              disabled={isLoading}
+              className="pr-20"
             />
 
             <button
               type="button"
-              onClick={() => setShowPassword((current) => !current)}
-              className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-semibold text-slate-400 transition-colors hover:text-white"
-              aria-label={showPassword ? "Ukryj hasło" : "Pokaż hasło"}
+              onClick={() =>
+                setShowPassword(
+                  (current) => !current,
+                )
+              }
+              disabled={isLoading}
+              className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-semibold text-zinc-400 transition-colors hover:text-zinc-100 disabled:opacity-50"
+              aria-label={
+                showPassword
+                  ? "Ukryj hasło"
+                  : "Pokaż hasło"
+              }
             >
-              {showPassword ? "Ukryj" : "Pokaż"}
+              {showPassword
+                ? "Ukryj"
+                : "Pokaż"}
             </button>
           </div>
-        </div>
+        </FormField>
 
         {error && (
-          <div
-            role="alert"
-            className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300"
-          >
+          <StatusMessage tone="error">
             {error}
-          </div>
+          </StatusMessage>
         )}
 
-        <button
+        <Button
           type="submit"
+          fullWidth
           disabled={isLoading}
-          className={primaryButtonClassName}
         >
-          {isLoading ? "Logowanie..." : "Zaloguj się"}
-        </button>
+          {isLoading
+            ? "Logowanie..."
+            : "Zaloguj się"}
+        </Button>
       </form>
 
-      <p className="mt-7 text-center text-sm text-slate-400">
+      <p className="mt-7 text-center text-sm text-zinc-400">
         Nie masz jeszcze konta?{" "}
         <button
           type="button"
           onClick={onRegisterClick}
-          className="font-semibold text-blue-400 transition-colors hover:text-blue-300"
+          disabled={isLoading}
+          className="font-semibold text-blue-400 transition-colors hover:text-blue-300 disabled:opacity-50"
         >
           Utwórz konto
         </button>
@@ -179,7 +224,9 @@ export default function LoginForm({
   );
 }
 
-function getLoginErrorMessage(error: unknown): string {
+function getLoginErrorMessage(
+  error: unknown,
+): string {
   if (!(error instanceof Error)) {
     return "Nie udało się zalogować.";
   }
@@ -196,12 +243,6 @@ function getLoginErrorMessage(error: unknown): string {
       return "Wykonano zbyt wiele prób. Spróbuj ponownie później.";
 
     default:
-      return error.message || "Nie udało się zalogować.";
+      return "Nie udało się zalogować. Spróbuj ponownie.";
   }
 }
-
-const inputClassName =
-  "mt-2 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-white outline-none transition-colors placeholder:text-slate-500 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10";
-
-const primaryButtonClassName =
-  "w-full rounded-xl bg-blue-600 px-4 py-3 font-semibold text-white shadow-lg shadow-blue-500/20 transition-all hover:-translate-y-0.5 hover:bg-blue-700 hover:shadow-xl hover:shadow-blue-500/20 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0";

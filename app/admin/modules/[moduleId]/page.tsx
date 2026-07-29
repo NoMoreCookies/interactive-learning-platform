@@ -5,9 +5,23 @@ import { useParams } from "next/navigation";
 
 import {
   type FormEvent,
+  useCallback,
   useEffect,
   useState,
 } from "react";
+
+import LessonCreateForm, {
+  type CreateLessonInput,
+} from "@/components/admin/module/LessonCreateForm";
+import ModuleLessonsList from "@/components/admin/module/ModuleLessonsList";
+import ModuleSettingsForm from "@/components/admin/module/ModuleSettingsForm";
+
+import type {
+  AdminModule,
+  AdminModuleLesson,
+} from "@/components/admin/module/types";
+
+import { StatusMessage } from "@/components/ui";
 
 import {
   createAdminLesson,
@@ -16,24 +30,7 @@ import {
   updateAdminModule,
 } from "@/lib/services/admin-service";
 
-type CourseModule = NonNullable<
-  Awaited<ReturnType<typeof getAdminModule>>
->;
-
-type Lesson = Awaited<
-  ReturnType<typeof getAdminLessonsByModuleId>
->[number];
-
-function createSlug(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/ł/g, "l")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
+import { createSlug } from "@/lib/utils/create-slug";
 
 export default function AdminModulePage() {
   const params = useParams<{
@@ -42,23 +39,27 @@ export default function AdminModulePage() {
 
   const moduleId = params.moduleId;
 
-  const [courseModule, setCourseModule] =
-    useState<CourseModule | null>(null);
+  const [
+    courseModule,
+    setCourseModule,
+  ] = useState<AdminModule | null>(
+    null,
+  );
 
   const [lessons, setLessons] =
-    useState<Lesson[]>([]);
+    useState<AdminModuleLesson[]>([]);
 
-  const [lessonTitle, setLessonTitle] =
-    useState("");
+  const [
+    statusMessage,
+    setStatusMessage,
+  ] = useState("");
 
-  const [lessonDescription, setLessonDescription] =
-    useState("");
-
-  const [durationMinutes, setDurationMinutes] =
-    useState(30);
-
-  const [statusMessage, setStatusMessage] =
-    useState("");
+  const [
+    statusTone,
+    setStatusTone,
+  ] = useState<
+    "info" | "success" | "error"
+  >("info");
 
   const [isLoading, setIsLoading] =
     useState(true);
@@ -66,32 +67,41 @@ export default function AdminModulePage() {
   const [isSaving, setIsSaving] =
     useState(false);
 
-  async function loadData() {
-    setIsLoading(true);
+  const loadData =
+    useCallback(async () => {
+      setIsLoading(true);
 
-    try {
-      const [moduleResult, lessonsResult] =
-        await Promise.all([
+      try {
+        const [
+          moduleResult,
+          lessonsResult,
+        ] = await Promise.all([
           getAdminModule(moduleId),
-          getAdminLessonsByModuleId(moduleId),
+          getAdminLessonsByModuleId(
+            moduleId,
+          ),
         ]);
 
-      setCourseModule(moduleResult);
-      setLessons(lessonsResult);
-    } catch (error) {
-      console.error(error);
+        setCourseModule(moduleResult);
+        setLessons(lessonsResult);
+      } catch (error) {
+        console.error(
+          "Failed to load module administration data.",
+          error,
+        );
 
-      setStatusMessage(
-        "Nie udało się pobrać modułu.",
-      );
-    } finally {
-      setIsLoading(false);
-    }
-  }
+        setStatusMessage(
+          "Nie udało się pobrać modułu.",
+        );
+        setStatusTone("error");
+      } finally {
+        setIsLoading(false);
+      }
+    }, [moduleId]);
 
   useEffect(() => {
     void loadData();
-  }, [moduleId]);
+  }, [loadData]);
 
   async function handleSaveModule(
     event: FormEvent<HTMLFormElement>,
@@ -103,15 +113,19 @@ export default function AdminModulePage() {
     }
 
     setIsSaving(true);
+    setStatusMessage("");
 
     try {
       await updateAdminModule({
         id: courseModule.id,
-        title: courseModule.title,
-        slug: courseModule.slug,
+        title:
+          courseModule.title.trim(),
+        slug: courseModule.slug.trim(),
         description:
-          courseModule.description ?? "",
-        order: courseModule.order ?? 0,
+          courseModule.description?.trim() ??
+          "",
+        order:
+          courseModule.order ?? 0,
         published:
           courseModule.published ?? false,
       });
@@ -119,61 +133,74 @@ export default function AdminModulePage() {
       setStatusMessage(
         "Moduł został zapisany.",
       );
+      setStatusTone("success");
     } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Nie udało się zapisać modułu.";
-
-      setStatusMessage(message);
+      setStatusMessage(
+        getErrorMessage(
+          error,
+          "Nie udało się zapisać modułu.",
+        ),
+      );
+      setStatusTone("error");
     } finally {
       setIsSaving(false);
     }
   }
 
   async function handleCreateLesson(
-    event: FormEvent<HTMLFormElement>,
-  ) {
-    event.preventDefault();
+    input: CreateLessonInput,
+  ): Promise<boolean> {
+    const title = input.title.trim();
+    const slug = createSlug(title);
 
-    if (!lessonTitle.trim()) {
+    if (!title) {
       setStatusMessage(
         "Podaj nazwę lekcji.",
       );
+      setStatusTone("error");
+      return false;
+    }
 
-      return;
+    if (!slug) {
+      setStatusMessage(
+        "Nie udało się utworzyć poprawnego slugu lekcji.",
+      );
+      setStatusTone("error");
+      return false;
     }
 
     setIsSaving(true);
+    setStatusMessage("");
 
     try {
       await createAdminLesson({
         moduleId,
-        title: lessonTitle.trim(),
-        slug: createSlug(lessonTitle),
+        title,
+        slug,
         description:
-          lessonDescription.trim(),
-        durationMinutes,
+          input.description.trim(),
+        durationMinutes:
+          input.durationMinutes,
         order: lessons.length + 1,
         published: false,
       });
 
-      setLessonTitle("");
-      setLessonDescription("");
-      setDurationMinutes(30);
-
       setStatusMessage(
         "Lekcja została utworzona.",
       );
+      setStatusTone("success");
 
       await loadData();
+      return true;
     } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Nie udało się utworzyć lekcji.";
-
-      setStatusMessage(message);
+      setStatusMessage(
+        getErrorMessage(
+          error,
+          "Nie udało się utworzyć lekcji.",
+        ),
+      );
+      setStatusTone("error");
+      return false;
     } finally {
       setIsSaving(false);
     }
@@ -181,7 +208,7 @@ export default function AdminModulePage() {
 
   if (isLoading) {
     return (
-      <main className="p-10 text-zinc-400">
+      <main className="text-zinc-400">
         Pobieranie modułu...
       </main>
     );
@@ -189,214 +216,86 @@ export default function AdminModulePage() {
 
   if (!courseModule) {
     return (
-      <main className="p-10">
+      <main className="text-zinc-300">
         Nie znaleziono modułu.
       </main>
     );
   }
 
   return (
-    <main className="p-10">
+    <main>
       <Link
         href={`/admin/courses/${courseModule.courseId}`}
-        className="text-sm text-zinc-400 hover:text-white"
+        className="text-sm text-zinc-400 transition hover:text-zinc-100"
       >
         ← Wróć do kursu
       </Link>
 
-      <h1 className="mt-6 text-4xl font-bold">
-        {courseModule.title}
-      </h1>
+      <header className="mt-6 flex flex-wrap items-start justify-between gap-5">
+        <div>
+          <p className="text-sm uppercase tracking-[0.2em] text-blue-400">
+            Moduł
+          </p>
 
-      <div className="mt-10 grid gap-8 xl:grid-cols-[1fr_420px]">
-        <div className="space-y-8">
-          <form
-            onSubmit={handleSaveModule}
-            className="rounded-2xl border border-zinc-800 bg-zinc-950 p-6"
-          >
-            <h2 className="text-xl font-semibold">
-              Ustawienia modułu
-            </h2>
-
-            <input
-              value={courseModule.title}
-              onChange={(event) =>
-                setCourseModule({
-                  ...courseModule,
-                  title: event.target.value,
-                })
-              }
-              className="mt-6 w-full rounded-xl border border-zinc-700 bg-black px-4 py-3"
-            />
-
-            <input
-              value={courseModule.slug}
-              onChange={(event) =>
-                setCourseModule({
-                  ...courseModule,
-                  slug: event.target.value,
-                })
-              }
-              className="mt-4 w-full rounded-xl border border-zinc-700 bg-black px-4 py-3"
-            />
-
-            <textarea
-              value={
-                courseModule.description ?? ""
-              }
-              onChange={(event) =>
-                setCourseModule({
-                  ...courseModule,
-                  description:
-                    event.target.value,
-                })
-              }
-              rows={5}
-              className="mt-4 w-full rounded-xl border border-zinc-700 bg-black px-4 py-3"
-            />
-
-            <label className="mt-5 flex items-center gap-3 text-sm">
-              <input
-                type="checkbox"
-                checked={
-                  courseModule.published ??
-                  false
-                }
-                onChange={(event) =>
-                  setCourseModule({
-                    ...courseModule,
-                    published:
-                      event.target.checked,
-                  })
-                }
-              />
-
-              Moduł opublikowany
-            </label>
-
-            <button
-              type="submit"
-              className="mt-6 rounded-xl bg-white px-6 py-3 font-semibold text-black"
-            >
-              Zapisz moduł
-            </button>
-          </form>
-
-          <section>
-            <h2 className="text-2xl font-semibold">
-              Lekcje
-            </h2>
-
-            <div className="mt-5 space-y-4">
-              {lessons.length === 0 && (
-                <div className="rounded-2xl border border-dashed border-zinc-700 p-8 text-zinc-400">
-                  Ten moduł nie ma jeszcze
-                  lekcji.
-                </div>
-              )}
-
-              {lessons.map((lesson) => (
-                <Link
-                  key={lesson.id}
-                  href={`/admin/lessons/${lesson.id}`}
-                  className="block rounded-2xl border border-zinc-800 bg-zinc-950 p-5 transition hover:border-zinc-600"
-                >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm text-zinc-500">
-                        Lekcja {lesson.order}
-                      </p>
-
-                      <h3 className="mt-1 text-lg font-semibold">
-                        {lesson.title}
-                      </h3>
-                    </div>
-
-                    <div className="flex gap-2 text-xs">
-                      <span
-                        className={
-                          lesson.videoPath
-                            ? "rounded-full bg-green-500/10 px-3 py-1 text-green-300"
-                            : "rounded-full bg-red-500/10 px-3 py-1 text-red-300"
-                        }
-                      >
-                        Film
-                      </span>
-
-                      <span
-                        className={
-                          lesson.materialsPath
-                            ? "rounded-full bg-green-500/10 px-3 py-1 text-green-300"
-                            : "rounded-full bg-red-500/10 px-3 py-1 text-red-300"
-                        }
-                      >
-                        Materiały
-                      </span>
-                    </div>
-                  </div>
-                </Link>
-              ))}
-            </div>
-          </section>
+          <h1 className="mt-3 text-4xl font-bold tracking-tight text-zinc-100">
+            {courseModule.title}
+          </h1>
         </div>
 
-        <form
-          onSubmit={handleCreateLesson}
-          className="h-fit rounded-2xl border border-zinc-800 bg-zinc-950 p-6"
+        <span
+          className={[
+            "rounded-full px-4 py-2 text-sm",
+            courseModule.published
+              ? "bg-emerald-500/10 text-emerald-300"
+              : "bg-amber-500/10 text-amber-300",
+          ].join(" ")}
         >
-          <h2 className="text-xl font-semibold">
-            Dodaj lekcję
-          </h2>
+          {courseModule.published
+            ? "Opublikowany"
+            : "Szkic"}
+        </span>
+      </header>
 
-          <input
-            value={lessonTitle}
-            onChange={(event) =>
-              setLessonTitle(event.target.value)
+      {statusMessage && (
+        <StatusMessage
+          tone={statusTone}
+          className="mt-6"
+        >
+          {statusMessage}
+        </StatusMessage>
+      )}
+
+      <div className="mt-10 grid gap-8 xl:grid-cols-[minmax(0,1fr)_420px]">
+        <div className="space-y-8">
+          <ModuleSettingsForm
+            courseModule={courseModule}
+            isSaving={isSaving}
+            onModuleChange={
+              setCourseModule
             }
-            className="mt-6 w-full rounded-xl border border-zinc-700 bg-black px-4 py-3"
-            placeholder="Nazwa lekcji"
+            onSubmit={handleSaveModule}
           />
 
-          <textarea
-            value={lessonDescription}
-            onChange={(event) =>
-              setLessonDescription(
-                event.target.value,
-              )
-            }
-            rows={5}
-            className="mt-4 w-full rounded-xl border border-zinc-700 bg-black px-4 py-3"
-            placeholder="Opis lekcji"
+          <ModuleLessonsList
+            lessons={lessons}
           />
+        </div>
 
-          <input
-            type="number"
-            min={0}
-            value={durationMinutes}
-            onChange={(event) =>
-              setDurationMinutes(
-                Number(event.target.value),
-              )
-            }
-            className="mt-4 w-full rounded-xl border border-zinc-700 bg-black px-4 py-3"
-            placeholder="Czas lekcji"
-          />
-
-          <button
-            type="submit"
-            disabled={isSaving}
-            className="mt-5 w-full rounded-xl bg-white px-5 py-3 font-semibold text-black disabled:opacity-50"
-          >
-            Dodaj lekcję
-          </button>
-
-          {statusMessage && (
-            <p className="mt-4 text-sm text-zinc-300">
-              {statusMessage}
-            </p>
-          )}
-        </form>
+        <LessonCreateForm
+          isSaving={isSaving}
+          onCreate={handleCreateLesson}
+        />
       </div>
     </main>
   );
+}
+
+function getErrorMessage(
+  error: unknown,
+  fallback: string,
+): string {
+  return error instanceof Error &&
+    error.message
+    ? error.message
+    : fallback;
 }

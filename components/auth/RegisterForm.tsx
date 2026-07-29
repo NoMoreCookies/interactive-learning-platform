@@ -1,57 +1,115 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import {
+  type FormEvent,
+  useMemo,
+  useState,
+} from "react";
+
 import { signUp } from "aws-amplify/auth";
+
+import {
+  Button,
+  FormField,
+  Input,
+  StatusMessage,
+} from "@/components/ui";
 
 type RegisterFormProps = {
   onLoginClick: () => void;
-  onConfirmationRequired: (email: string) => void;
+  onConfirmationRequired: (
+    email: string,
+  ) => void;
+};
+
+type PasswordRequirements = {
+  length: boolean;
+  uppercase: boolean;
+  number: boolean;
+  specialCharacter: boolean;
 };
 
 export default function RegisterForm({
   onLoginClick,
   onConfirmationRequired,
 }: RegisterFormProps) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [repeatedPassword, setRepeatedPassword] = useState("");
+  const [email, setEmail] =
+    useState("");
 
-  const [showPassword, setShowPassword] = useState(false);
-  const [showRepeatedPassword, setShowRepeatedPassword] = useState(false);
+  const [password, setPassword] =
+    useState("");
 
-  const [error, setError] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
+  const [
+    repeatedPassword,
+    setRepeatedPassword,
+  ] = useState("");
 
-  const passwordRequirements = {
-    length: password.length >= 8,
-    uppercase: /[A-Z]/.test(password),
-    number: /\d/.test(password),
-    specialCharacter: /[^A-Za-z0-9]/.test(password),
-  };
+  const [
+    showPassword,
+    setShowPassword,
+  ] = useState(false);
 
-  const isPasswordValid = Object.values(passwordRequirements).every(Boolean);
+  const [
+    showRepeatedPassword,
+    setShowRepeatedPassword,
+  ] = useState(false);
+
+  const [error, setError] =
+    useState("");
+
+  const [isLoading, setIsLoading] =
+    useState(false);
+
+  const passwordRequirements =
+    useMemo<PasswordRequirements>(
+      () => ({
+        length: password.length >= 8,
+        uppercase:
+          /[A-Z]/.test(password),
+        number: /\d/.test(password),
+        specialCharacter:
+          /[^A-Za-z0-9]/.test(
+            password,
+          ),
+      }),
+      [password],
+    );
+
+  const isPasswordValid =
+    Object.values(
+      passwordRequirements,
+    ).every(Boolean);
+
   const passwordsMatch =
-    password.length > 0 && password === repeatedPassword;
+    password.length > 0 &&
+    password === repeatedPassword;
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(
+    event: FormEvent<HTMLFormElement>,
+  ) {
     event.preventDefault();
 
     setError("");
 
     if (!isPasswordValid) {
-      setError("Hasło nie spełnia wszystkich wymagań.");
+      setError(
+        "Hasło nie spełnia wszystkich wymagań.",
+      );
       return;
     }
 
     if (!passwordsMatch) {
-      setError("Podane hasła nie są identyczne.");
+      setError(
+        "Podane hasła nie są identyczne.",
+      );
       return;
     }
 
     setIsLoading(true);
 
     try {
-      const normalizedEmail = email.trim().toLowerCase();
+      const normalizedEmail =
+        email.trim().toLowerCase();
 
       const result = await signUp({
         username: normalizedEmail,
@@ -63,8 +121,13 @@ export default function RegisterForm({
         },
       });
 
-      if (result.nextStep.signUpStep === "CONFIRM_SIGN_UP") {
-        onConfirmationRequired(normalizedEmail);
+      if (
+        result.nextStep.signUpStep ===
+        "CONFIRM_SIGN_UP"
+      ) {
+        onConfirmationRequired(
+          normalizedEmail,
+        );
         return;
       }
 
@@ -73,9 +136,15 @@ export default function RegisterForm({
         return;
       }
 
-      setError("Rejestracja wymaga wykonania dodatkowego kroku.");
-    } catch (error) {
-      setError(getRegisterErrorMessage(error));
+      setError(
+        "Rejestracja wymaga wykonania dodatkowego kroku.",
+      );
+    } catch (caughtError) {
+      setError(
+        getRegisterErrorMessage(
+          caughtError,
+        ),
+      );
     } finally {
       setIsLoading(false);
     }
@@ -84,160 +153,218 @@ export default function RegisterForm({
   return (
     <div>
       <div className="mb-8">
-        <h1 className="text-3xl font-bold tracking-tight text-white">
+        <h1 className="text-3xl font-bold tracking-tight text-zinc-100">
           Utwórz swoje konto
         </h1>
 
-        <p className="mt-2 text-sm leading-6 text-slate-400">
-          Załóż konto i rozpocznij naukę na platformie.
+        <p className="mt-2 text-sm leading-6 text-zinc-400">
+          Załóż konto i rozpocznij naukę
+          na platformie.
         </p>
       </div>
 
-      <form onSubmit={handleSubmit} className="space-y-5">
-        <div>
-          <label
-            htmlFor="register-email"
-            className="text-sm font-medium text-slate-300"
-          >
-            Adres e-mail
-          </label>
-
-          <input
+      <form
+        onSubmit={handleSubmit}
+        className="space-y-5"
+      >
+        <FormField
+          htmlFor="register-email"
+          label="Adres e-mail"
+        >
+          <Input
             id="register-email"
             type="email"
             autoComplete="email"
             value={email}
-            onChange={(event) => setEmail(event.target.value)}
+            onChange={(event) =>
+              setEmail(event.target.value)
+            }
             placeholder="Wpisz swój e-mail"
             required
-            className={inputClassName}
+            disabled={isLoading}
           />
-        </div>
+        </FormField>
 
-        <div>
-          <label
-            htmlFor="register-password"
-            className="text-sm font-medium text-slate-300"
-          >
-            Hasło
-          </label>
+        <FormField
+          htmlFor="register-password"
+          label="Hasło"
+        >
+          <PasswordInput
+            id="register-password"
+            value={password}
+            visible={showPassword}
+            onValueChange={setPassword}
+            onVisibilityChange={() =>
+              setShowPassword(
+                (current) => !current,
+              )
+            }
+            disabled={isLoading}
+            placeholder="Utwórz hasło"
+          />
+        </FormField>
 
-          <div className="relative">
-            <input
-              id="register-password"
-              type={showPassword ? "text" : "password"}
-              autoComplete="new-password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder="Utwórz hasło"
-              required
-              className={`${inputClassName} pr-20`}
-            />
+        <FormField
+          htmlFor="register-repeat-password"
+          label="Powtórz hasło"
+          error={
+            repeatedPassword &&
+            !passwordsMatch
+              ? "Hasła nie są identyczne."
+              : undefined
+          }
+        >
+          <PasswordInput
+            id="register-repeat-password"
+            value={repeatedPassword}
+            visible={
+              showRepeatedPassword
+            }
+            onValueChange={
+              setRepeatedPassword
+            }
+            onVisibilityChange={() =>
+              setShowRepeatedPassword(
+                (current) => !current,
+              )
+            }
+            disabled={isLoading}
+            placeholder="Powtórz hasło"
+            aria-invalid={
+              Boolean(
+                repeatedPassword &&
+                  !passwordsMatch,
+              )
+            }
+            aria-describedby={
+              repeatedPassword &&
+              !passwordsMatch
+                ? "register-repeat-password-error"
+                : undefined
+            }
+          />
+        </FormField>
 
-            <button
-              type="button"
-              onClick={() => setShowPassword((current) => !current)}
-              className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-semibold text-slate-400 transition-colors hover:text-white"
-              aria-label={showPassword ? "Ukryj hasło" : "Pokaż hasło"}
-            >
-              {showPassword ? "Ukryj" : "Pokaż"}
-            </button>
-          </div>
-        </div>
-
-        <div>
-          <label
-            htmlFor="register-repeat-password"
-            className="text-sm font-medium text-slate-300"
-          >
-            Powtórz hasło
-          </label>
-
-          <div className="relative">
-            <input
-              id="register-repeat-password"
-              type={showRepeatedPassword ? "text" : "password"}
-              autoComplete="new-password"
-              value={repeatedPassword}
-              onChange={(event) => setRepeatedPassword(event.target.value)}
-              placeholder="Powtórz hasło"
-              required
-              className={`${inputClassName} pr-20`}
-            />
-
-            <button
-              type="button"
-              onClick={() =>
-                setShowRepeatedPassword((current) => !current)
-              }
-              className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-semibold text-slate-400 transition-colors hover:text-white"
-              aria-label={
-                showRepeatedPassword
-                  ? "Ukryj powtórzone hasło"
-                  : "Pokaż powtórzone hasło"
-              }
-            >
-              {showRepeatedPassword ? "Ukryj" : "Pokaż"}
-            </button>
-          </div>
-
-          {repeatedPassword && !passwordsMatch && (
-            <p className="mt-2 text-xs text-red-300">
-              Hasła nie są identyczne.
-            </p>
-          )}
-        </div>
-
-        <div className="grid grid-cols-1 gap-2 rounded-xl border border-slate-800 bg-slate-950/70 p-4 text-xs sm:grid-cols-2">
+        <div className="grid grid-cols-1 gap-2 rounded-xl border border-zinc-800 bg-zinc-950/70 p-4 text-xs sm:grid-cols-2">
           <PasswordRequirement
-            fulfilled={passwordRequirements.length}
+            fulfilled={
+              passwordRequirements.length
+            }
             label="Minimum 8 znaków"
           />
 
           <PasswordRequirement
-            fulfilled={passwordRequirements.uppercase}
+            fulfilled={
+              passwordRequirements.uppercase
+            }
             label="Jedna wielka litera"
           />
 
           <PasswordRequirement
-            fulfilled={passwordRequirements.number}
+            fulfilled={
+              passwordRequirements.number
+            }
             label="Jedna cyfra"
           />
 
           <PasswordRequirement
-            fulfilled={passwordRequirements.specialCharacter}
+            fulfilled={
+              passwordRequirements.specialCharacter
+            }
             label="Znak specjalny"
           />
         </div>
 
         {error && (
-          <div
-            role="alert"
-            className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300"
-          >
+          <StatusMessage tone="error">
             {error}
-          </div>
+          </StatusMessage>
         )}
 
-        <button
+        <Button
           type="submit"
+          fullWidth
           disabled={isLoading}
-          className={primaryButtonClassName}
         >
-          {isLoading ? "Tworzenie konta..." : "Załóż konto"}
-        </button>
+          {isLoading
+            ? "Tworzenie konta..."
+            : "Załóż konto"}
+        </Button>
       </form>
 
-      <p className="mt-7 text-center text-sm text-slate-400">
+      <p className="mt-7 text-center text-sm text-zinc-400">
         Masz już konto?{" "}
         <button
           type="button"
           onClick={onLoginClick}
-          className="font-semibold text-blue-400 transition-colors hover:text-blue-300"
+          disabled={isLoading}
+          className="font-semibold text-blue-400 transition-colors hover:text-blue-300 disabled:opacity-50"
         >
           Zaloguj się
         </button>
       </p>
+    </div>
+  );
+}
+
+type PasswordInputProps = {
+  id: string;
+  value: string;
+  visible: boolean;
+  placeholder: string;
+  disabled: boolean;
+  onValueChange: (
+    value: string,
+  ) => void;
+  onVisibilityChange: () => void;
+  "aria-invalid"?: boolean;
+  "aria-describedby"?: string;
+};
+
+function PasswordInput({
+  id,
+  value,
+  visible,
+  placeholder,
+  disabled,
+  onValueChange,
+  onVisibilityChange,
+  ...ariaProps
+}: PasswordInputProps) {
+  return (
+    <div className="relative">
+      <Input
+        id={id}
+        type={
+          visible ? "text" : "password"
+        }
+        autoComplete="new-password"
+        value={value}
+        onChange={(event) =>
+          onValueChange(
+            event.target.value,
+          )
+        }
+        placeholder={placeholder}
+        required
+        disabled={disabled}
+        className="pr-20"
+        {...ariaProps}
+      />
+
+      <button
+        type="button"
+        onClick={onVisibilityChange}
+        disabled={disabled}
+        className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-semibold text-zinc-400 transition-colors hover:text-zinc-100 disabled:opacity-50"
+        aria-label={
+          visible
+            ? "Ukryj hasło"
+            : "Pokaż hasło"
+        }
+      >
+        {visible ? "Ukryj" : "Pokaż"}
+      </button>
     </div>
   );
 }
@@ -251,16 +378,21 @@ function PasswordRequirement({
 }) {
   return (
     <div
-      className={`flex items-center gap-2 ${
-        fulfilled ? "text-emerald-400" : "text-slate-500"
-      }`}
+      className={[
+        "flex items-center gap-2",
+        fulfilled
+          ? "text-emerald-400"
+          : "text-zinc-500",
+      ].join(" ")}
     >
       <span
-        className={`flex h-4 w-4 items-center justify-center rounded-full border text-[10px] ${
+        aria-hidden="true"
+        className={[
+          "flex h-4 w-4 items-center justify-center rounded-full border text-[10px]",
           fulfilled
             ? "border-emerald-500 bg-emerald-500/10"
-            : "border-slate-700"
-        }`}
+            : "border-zinc-700",
+        ].join(" ")}
       >
         {fulfilled ? "✓" : ""}
       </span>
@@ -270,7 +402,9 @@ function PasswordRequirement({
   );
 }
 
-function getRegisterErrorMessage(error: unknown): string {
+function getRegisterErrorMessage(
+  error: unknown,
+): string {
   if (!(error instanceof Error)) {
     return "Nie udało się utworzyć konta.";
   }
@@ -289,12 +423,6 @@ function getRegisterErrorMessage(error: unknown): string {
       return "Wykonano zbyt wiele prób. Spróbuj ponownie później.";
 
     default:
-      return error.message || "Nie udało się utworzyć konta.";
+      return "Nie udało się utworzyć konta. Spróbuj ponownie.";
   }
 }
-
-const inputClassName =
-  "mt-2 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-white outline-none transition-colors placeholder:text-slate-500 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10";
-
-const primaryButtonClassName =
-  "w-full rounded-xl bg-blue-600 px-4 py-3 font-semibold text-white shadow-lg shadow-blue-500/20 transition-all hover:-translate-y-0.5 hover:bg-blue-700 hover:shadow-xl hover:shadow-blue-500/20 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0";

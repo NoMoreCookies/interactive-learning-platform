@@ -1,10 +1,21 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import {
+  type FormEvent,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+
 import {
   confirmSignUp,
   resendSignUpCode,
 } from "aws-amplify/auth";
+
+import {
+  Button,
+  StatusMessage,
+} from "@/components/ui";
 
 import VerificationCodeInput from "./VerificationCodeInput";
 
@@ -19,45 +30,81 @@ export default function ConfirmSignUpForm({
   onBack,
   onConfirmed,
 }: ConfirmSignUpFormProps) {
-  const [code, setCode] = useState("");
-  const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
+  const [code, setCode] =
+    useState("");
 
-  const [isLoading, setIsLoading] = useState(false);
-  const [isResending, setIsResending] = useState(false);
+  const [error, setError] =
+    useState("");
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  const [message, setMessage] =
+    useState("");
+
+  const [isLoading, setIsLoading] =
+    useState(false);
+
+  const [
+    isResending,
+    setIsResending,
+  ] = useState(false);
+
+  const redirectTimeoutRef =
+    useRef<ReturnType<
+      typeof setTimeout
+    > | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (redirectTimeoutRef.current) {
+        clearTimeout(
+          redirectTimeoutRef.current,
+        );
+      }
+    };
+  }, []);
+
+  async function handleSubmit(
+    event: FormEvent<HTMLFormElement>,
+  ) {
     event.preventDefault();
 
     setError("");
     setMessage("");
 
     if (code.length !== 6) {
-      setError("Wpisz pełny 6-cyfrowy kod.");
+      setError(
+        "Wpisz pełny 6-cyfrowy kod.",
+      );
       return;
     }
 
     setIsLoading(true);
 
     try {
-      const result = await confirmSignUp({
-        username: email,
-        confirmationCode: code,
-      });
+      const result =
+        await confirmSignUp({
+          username: email,
+          confirmationCode: code,
+        });
 
-      if (result.isSignUpComplete) {
-        setMessage("Konto zostało aktywowane.");
-
-        window.setTimeout(() => {
-          onConfirmed();
-        }, 1200);
-
+      if (!result.isSignUpComplete) {
+        setError(
+          "Potwierdzenie konta wymaga dodatkowego kroku.",
+        );
         return;
       }
 
-      setError("Potwierdzenie konta wymaga dodatkowego kroku.");
-    } catch (error) {
-      setError(getConfirmationErrorMessage(error));
+      setMessage(
+        "Konto zostało aktywowane.",
+      );
+
+      redirectTimeoutRef.current =
+        setTimeout(onConfirmed, 1200);
+    } catch (caughtError) {
+      setError(
+        getConfirmationErrorMessage(
+          caughtError,
+        ),
+      );
     } finally {
       setIsLoading(false);
     }
@@ -73,22 +120,34 @@ export default function ConfirmSignUpForm({
         username: email,
       });
 
-      setMessage("Nowy kod został wysłany na podany adres e-mail.");
-    } catch (error) {
-      setError(getResendErrorMessage(error));
+      setMessage(
+        "Nowy kod został wysłany na podany adres e-mail.",
+      );
+    } catch (caughtError) {
+      setError(
+        getResendErrorMessage(
+          caughtError,
+        ),
+      );
     } finally {
       setIsResending(false);
     }
   }
+
+  const interactionDisabled =
+    isLoading || isResending;
 
   return (
     <div>
       <button
         type="button"
         onClick={onBack}
-        className="mb-7 inline-flex items-center gap-2 text-sm font-medium text-slate-400 transition hover:text-white"
+        disabled={interactionDisabled}
+        className="mb-7 inline-flex items-center gap-2 text-sm font-medium text-zinc-400 transition hover:text-zinc-100 disabled:opacity-50"
       >
-        <span aria-hidden="true">←</span>
+        <span aria-hidden="true">
+          ←
+        </span>
         Powrót
       </button>
 
@@ -97,12 +156,13 @@ export default function ConfirmSignUpForm({
           <MailIcon />
         </div>
 
-        <h1 className="text-3xl font-bold tracking-tight text-white">
+        <h1 className="text-3xl font-bold tracking-tight text-zinc-100">
           Sprawdź swoją skrzynkę
         </h1>
 
-        <p className="mt-3 text-sm leading-6 text-slate-400">
-          Wysłaliśmy 6-cyfrowy kod potwierdzający na adres:
+        <p className="mt-3 text-sm leading-6 text-zinc-400">
+          Wysłaliśmy 6-cyfrowy kod
+          potwierdzający na adres:
         </p>
 
         <p className="mt-1 break-all font-semibold text-blue-400">
@@ -111,59 +171,70 @@ export default function ConfirmSignUpForm({
       </div>
 
       <form onSubmit={handleSubmit}>
-        <label className="mb-3 block text-sm font-medium text-slate-300">
+        <label className="mb-3 block text-sm font-medium text-zinc-300">
           Kod potwierdzający
         </label>
 
         <VerificationCodeInput
           value={code}
           onChange={setCode}
-          disabled={isLoading}
+          disabled={interactionDisabled}
         />
 
         {error && (
-          <div
-            role="alert"
-            className="mt-5 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300"
+          <StatusMessage
+            tone="error"
+            className="mt-5"
           >
             {error}
-          </div>
+          </StatusMessage>
         )}
 
         {message && (
-          <div
-            role="status"
-            className="mt-5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300"
+          <StatusMessage
+            tone="success"
+            className="mt-5"
           >
             {message}
-          </div>
+          </StatusMessage>
         )}
 
-        <button
+        <Button
           type="submit"
-          disabled={isLoading || code.length !== 6}
-          className={`${primaryButtonClassName} mt-6`}
+          fullWidth
+          className="mt-6"
+          disabled={
+            interactionDisabled ||
+            code.length !== 6
+          }
         >
-          {isLoading ? "Potwierdzanie..." : "Potwierdź konto"}
-        </button>
+          {isLoading
+            ? "Potwierdzanie..."
+            : "Potwierdź konto"}
+        </Button>
       </form>
 
-      <div className="mt-6 text-center text-sm text-slate-400">
+      <div className="mt-6 text-center text-sm text-zinc-400">
         Nie dostałeś kodu?{" "}
         <button
           type="button"
-          onClick={handleResendCode}
-          disabled={isResending}
+          onClick={() =>
+            void handleResendCode()
+          }
+          disabled={interactionDisabled}
           className="font-semibold text-blue-400 transition-colors hover:text-blue-300 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {isResending ? "Wysyłanie..." : "Wyślij ponownie"}
+          {isResending
+            ? "Wysyłanie..."
+            : "Wyślij ponownie"}
         </button>
       </div>
 
       <button
         type="button"
         onClick={onBack}
-        className="mt-6 w-full text-center text-sm font-semibold text-slate-400 transition hover:text-white"
+        disabled={interactionDisabled}
+        className="mt-6 w-full text-center text-sm font-semibold text-zinc-400 transition hover:text-zinc-100 disabled:opacity-50"
       >
         ← Zmień adres e-mail
       </button>
@@ -181,13 +252,21 @@ function MailIcon() {
       strokeWidth="2"
       aria-hidden="true"
     >
-      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <rect
+        x="3"
+        y="5"
+        width="18"
+        height="14"
+        rx="2"
+      />
       <path d="m3 7 9 6 9-6" />
     </svg>
   );
 }
 
-function getConfirmationErrorMessage(error: unknown): string {
+function getConfirmationErrorMessage(
+  error: unknown,
+): string {
   if (!(error instanceof Error)) {
     return "Nie udało się potwierdzić konta.";
   }
@@ -206,11 +285,13 @@ function getConfirmationErrorMessage(error: unknown): string {
       return "Wykonano zbyt wiele prób. Spróbuj ponownie później.";
 
     default:
-      return error.message || "Nie udało się potwierdzić konta.";
+      return "Nie udało się potwierdzić konta. Spróbuj ponownie.";
   }
 }
 
-function getResendErrorMessage(error: unknown): string {
+function getResendErrorMessage(
+  error: unknown,
+): string {
   if (!(error instanceof Error)) {
     return "Nie udało się ponownie wysłać kodu.";
   }
@@ -226,9 +307,6 @@ function getResendErrorMessage(error: unknown): string {
       return "Konto może być już potwierdzone.";
 
     default:
-      return error.message || "Nie udało się ponownie wysłać kodu.";
+      return "Nie udało się ponownie wysłać kodu. Spróbuj ponownie.";
   }
 }
-
-const primaryButtonClassName =
-  "w-full rounded-xl bg-blue-600 px-4 py-3 font-semibold text-white shadow-lg shadow-blue-500/20 transition-all hover:-translate-y-0.5 hover:bg-blue-700 hover:shadow-xl hover:shadow-blue-500/20 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0";

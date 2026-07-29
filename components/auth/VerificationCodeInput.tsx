@@ -1,9 +1,9 @@
 "use client";
 
 import {
-  ChangeEvent,
-  ClipboardEvent,
-  KeyboardEvent,
+  type ChangeEvent,
+  type ClipboardEvent,
+  type KeyboardEvent,
   useEffect,
   useRef,
   useState,
@@ -22,17 +22,25 @@ export default function VerificationCodeInput({
   disabled = false,
   length = 6,
 }: VerificationCodeInputProps) {
-  const [digits, setDigits] = useState<string[]>(
-    Array.from({ length }, (_, index) => value[index] ?? ""),
-  );
+  const [digits, setDigits] =
+    useState<string[]>(() =>
+      createDigits(value, length),
+    );
 
-  const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
+  const inputRefs =
+    useRef<
+      Array<HTMLInputElement | null>
+    >([]);
 
   useEffect(() => {
-    setDigits(Array.from({ length }, (_, index) => value[index] ?? ""));
+    setDigits(
+      createDigits(value, length),
+    );
   }, [length, value]);
 
-  function updateDigits(nextDigits: string[]) {
+  function updateDigits(
+    nextDigits: string[],
+  ) {
     setDigits(nextDigits);
     onChange(nextDigits.join(""));
   }
@@ -41,22 +49,26 @@ export default function VerificationCodeInput({
     event: ChangeEvent<HTMLInputElement>,
     index: number,
   ) {
-    const inputValue = event.target.value.replace(/\D/g, "");
-
-    if (!inputValue) {
-      const nextDigits = [...digits];
-      nextDigits[index] = "";
-      updateDigits(nextDigits);
-      return;
-    }
+    const inputValue =
+      event.target.value.replace(
+        /\D/g,
+        "",
+      );
 
     const nextDigits = [...digits];
-    nextDigits[index] = inputValue.at(-1) ?? "";
+
+    nextDigits[index] =
+      inputValue.at(-1) ?? "";
 
     updateDigits(nextDigits);
 
-    if (index < length - 1) {
-      inputRefs.current[index + 1]?.focus();
+    if (
+      inputValue &&
+      index < length - 1
+    ) {
+      inputRefs.current[
+        index + 1
+      ]?.focus();
     }
   }
 
@@ -64,82 +76,125 @@ export default function VerificationCodeInput({
     event: KeyboardEvent<HTMLInputElement>,
     index: number,
   ) {
-    if (event.key === "Backspace" && !digits[index] && index > 0) {
-      inputRefs.current[index - 1]?.focus();
+    if (
+      event.key === "Backspace" &&
+      !digits[index] &&
+      index > 0
+    ) {
+      inputRefs.current[
+        index - 1
+      ]?.focus();
+      return;
     }
 
-    if (event.key === "ArrowLeft" && index > 0) {
-      inputRefs.current[index - 1]?.focus();
+    if (
+      event.key === "ArrowLeft" &&
+      index > 0
+    ) {
+      inputRefs.current[
+        index - 1
+      ]?.focus();
+      return;
     }
 
-    if (event.key === "ArrowRight" && index < length - 1) {
-      inputRefs.current[index + 1]?.focus();
+    if (
+      event.key === "ArrowRight" &&
+      index < length - 1
+    ) {
+      inputRefs.current[
+        index + 1
+      ]?.focus();
     }
   }
 
-  function handlePaste(event: ClipboardEvent<HTMLInputElement>) {
+  function handlePaste(
+    event: ClipboardEvent<HTMLInputElement>,
+  ) {
     event.preventDefault();
 
-    const pastedCode = event.clipboardData
-      .getData("text")
-      .replace(/\D/g, "")
-      .slice(0, length);
+    const pastedCode =
+      event.clipboardData
+        .getData("text")
+        .replace(/\D/g, "")
+        .slice(0, length);
 
     if (!pastedCode) {
       return;
     }
 
-    const nextDigits = Array.from(
-      { length },
-      (_, index) => pastedCode[index] ?? "",
+    updateDigits(
+      createDigits(
+        pastedCode,
+        length,
+      ),
     );
 
-    updateDigits(nextDigits);
+    const lastFilledIndex =
+      Math.min(
+        pastedCode.length,
+        length,
+      ) - 1;
 
-    const lastFilledIndex = Math.min(pastedCode.length, length) - 1;
-    inputRefs.current[lastFilledIndex]?.focus();
+    inputRefs.current[
+      lastFilledIndex
+    ]?.focus();
   }
 
   return (
     <div
       className="flex justify-between gap-2"
+      role="group"
       aria-label="Kod potwierdzający"
     >
-      {digits.map((digit, index) => (
-        <input
-          key={index}
-          ref={(element) => {
-            inputRefs.current[index] = element;
-          }}
-          type="text"
-          inputMode="numeric"
-          autoComplete={index === 0 ? "one-time-code" : "off"}
-          maxLength={1}
-          value={digit}
-          disabled={disabled}
-          onChange={(event) => handleChange(event, index)}
-          onKeyDown={(event) => handleKeyDown(event, index)}
-          onPaste={handlePaste}
-          aria-label={`Cyfra ${index + 1} kodu`}
-          className="
-            h-14 min-w-0 flex-1
-            rounded-xl
-            border border-slate-700
-            bg-slate-950
-            text-center text-xl font-semibold text-white
-            outline-none
-            transition-colors
-            caret-blue-400
-            focus:border-blue-500
-            focus:ring-4
-            focus:ring-blue-500/10
-            disabled:cursor-not-allowed
-            disabled:border-slate-800
-            disabled:bg-slate-900
-            disabled:text-slate-500
-          "
-        />
-      ))}
+      {digits.map(
+        (digit, index) => (
+          <input
+            key={index}
+            ref={(element) => {
+              inputRefs.current[index] =
+                element;
+            }}
+            type="text"
+            inputMode="numeric"
+            autoComplete={
+              index === 0
+                ? "one-time-code"
+                : "off"
+            }
+            maxLength={1}
+            value={digit}
+            disabled={disabled}
+            onChange={(event) =>
+              handleChange(
+                event,
+                index,
+              )
+            }
+            onKeyDown={(event) =>
+              handleKeyDown(
+                event,
+                index,
+              )
+            }
+            onPaste={handlePaste}
+            aria-label={`Cyfra ${
+              index + 1
+            } kodu`}
+            className="h-14 min-w-0 flex-1 rounded-xl border border-zinc-700 bg-zinc-950 text-center text-xl font-semibold text-zinc-100 outline-none transition-colors caret-blue-400 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-500"
+          />
+        ),
+      )}
     </div>
+  );
+}
+
+function createDigits(
+  value: string,
+  length: number,
+): string[] {
+  return Array.from(
+    { length },
+    (_, index) =>
+      value[index] ?? "",
   );
 }

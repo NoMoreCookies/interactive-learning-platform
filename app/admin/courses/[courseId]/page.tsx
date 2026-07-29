@@ -4,65 +4,39 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 
 import {
+  type FormEvent,
   useCallback,
   useEffect,
   useState,
-  FormEvent,
 } from "react";
+
+import CourseModulesList from "@/components/admin/course/CourseModulesList";
+import CourseSettingsForm from "@/components/admin/course/CourseSettingsForm";
+import ModuleCreateForm, {
+  type CreateModuleInput,
+} from "@/components/admin/course/ModuleCreateForm";
+
+import type {
+  AdminCourse,
+  AdminCourseModule,
+} from "@/components/admin/course/types";
+
+import { StatusMessage } from "@/components/ui";
 
 import {
   createAdminModule,
   getAdminCourse,
   getAdminModulesByCourseId,
   updateAdminCourse,
-  type CourseLevel,
-  type CourseSubject,
 } from "@/lib/services/admin-service";
 
-type Course = NonNullable<
-  Awaited<ReturnType<typeof getAdminCourse>>
->;
+import {
+  parseCourseLevel,
+  parseCourseSubject,
+} from "@/lib/utils/course-values";
 
-type CourseModule = Awaited<
-  ReturnType<typeof getAdminModulesByCourseId>
->[number];
+import { createSlug } from "@/lib/utils/create-slug";
 
-function createSlug(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/ł/g, "l")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-function parseCourseSubject(
-  value: string | null | undefined,
-): CourseSubject | null {
-  if (
-    value === "MATHEMATICS" ||
-    value === "PHYSICS" ||
-    value === "COMPUTER_SCIENCE"
-  ) {
-    return value;
-  }
-
-  return null;
-}
-
-function parseCourseLevel(
-  value: string | null | undefined,
-): CourseLevel | null {
-  if (
-    value === "BASIC" ||
-    value === "EXTENDED"
-  ) {
-    return value;
-  }
-
-  return null;
-}
 export default function AdminCoursePage() {
   const params = useParams<{
     courseId: string;
@@ -71,19 +45,22 @@ export default function AdminCoursePage() {
   const courseId = params.courseId;
 
   const [course, setCourse] =
-    useState<Course | null>(null);
+    useState<AdminCourse | null>(null);
 
   const [modules, setModules] =
-    useState<CourseModule[]>([]);
+    useState<AdminCourseModule[]>([]);
 
-  const [moduleTitle, setModuleTitle] =
-    useState("");
+  const [
+    statusMessage,
+    setStatusMessage,
+  ] = useState("");
 
-  const [moduleDescription, setModuleDescription] =
-    useState("");
-
-  const [statusMessage, setStatusMessage] =
-    useState("");
+  const [
+    statusTone,
+    setStatusTone,
+  ] = useState<
+    "info" | "success" | "error"
+  >("info");
 
   const [isLoading, setIsLoading] =
     useState(true);
@@ -91,33 +68,41 @@ export default function AdminCoursePage() {
   const [isSaving, setIsSaving] =
     useState(false);
 
-  const loadData = useCallback(async () => {
-    setIsLoading(true);
+  const loadData =
+    useCallback(async () => {
+      setIsLoading(true);
 
-    try {
-      const [courseResult, modulesResult] =
-        await Promise.all([
+      try {
+        const [
+          courseResult,
+          modulesResult,
+        ] = await Promise.all([
           getAdminCourse(courseId),
-          getAdminModulesByCourseId(courseId),
+          getAdminModulesByCourseId(
+            courseId,
+          ),
         ]);
 
-      setCourse(courseResult);
-      setModules(modulesResult);
-    } catch (error) {
-      console.error(error);
+        setCourse(courseResult);
+        setModules(modulesResult);
+      } catch (error) {
+        console.error(
+          "Failed to load course administration data.",
+          error,
+        );
 
-      setStatusMessage(
-        "Nie udało się pobrać kursu.",
-      );
-    } finally {
-      setIsLoading(false);
-    }
-  }, [courseId]);
+        setStatusMessage(
+          "Nie udało się pobrać kursu.",
+        );
+        setStatusTone("error");
+      } finally {
+        setIsLoading(false);
+      }
+    }, [courseId]);
 
   useEffect(() => {
     void loadData();
   }, [loadData]);
-
 
   async function handleSaveCourse(
     event: FormEvent<HTMLFormElement>,
@@ -132,43 +117,60 @@ export default function AdminCoursePage() {
     setStatusMessage("");
 
     try {
-        await updateAdminCourse({
+      await updateAdminCourse({
         id: course.id,
-        title: course.title,
-        slug: course.slug,
-        description: course.description ?? "",
-        subject: parseCourseSubject(course.subject),
-        level: parseCourseLevel(course.level),
+        title: course.title.trim(),
+        slug: course.slug.trim(),
+        description:
+          course.description?.trim() ?? "",
+        subject: parseCourseSubject(
+          course.subject,
+        ),
+        level: parseCourseLevel(
+          course.level,
+        ),
         order: course.order ?? 0,
-        published: course.published ?? false,
-        });
+        published:
+          course.published ?? false,
+      });
 
       setStatusMessage(
         "Zmiany w kursie zostały zapisane.",
       );
+      setStatusTone("success");
     } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Nie udało się zapisać kursu.";
-
-      setStatusMessage(message);
+      setStatusMessage(
+        getErrorMessage(
+          error,
+          "Nie udało się zapisać kursu.",
+        ),
+      );
+      setStatusTone("error");
     } finally {
       setIsSaving(false);
     }
   }
 
   async function handleCreateModule(
-    event: FormEvent<HTMLFormElement>,
-  ) {
-    event.preventDefault();
+    input: CreateModuleInput,
+  ): Promise<boolean> {
+    const title = input.title.trim();
+    const slug = createSlug(title);
 
-    if (!moduleTitle.trim()) {
+    if (!title) {
       setStatusMessage(
         "Podaj nazwę modułu.",
       );
+      setStatusTone("error");
+      return false;
+    }
 
-      return;
+    if (!slug) {
+      setStatusMessage(
+        "Nie udało się utworzyć poprawnego slugu modułu.",
+      );
+      setStatusTone("error");
+      return false;
     }
 
     setIsSaving(true);
@@ -177,28 +179,30 @@ export default function AdminCoursePage() {
     try {
       await createAdminModule({
         courseId,
-        title: moduleTitle.trim(),
-        slug: createSlug(moduleTitle),
-        description: moduleDescription.trim(),
+        title,
+        slug,
+        description:
+          input.description.trim(),
         order: modules.length + 1,
         published: false,
       });
 
-      setModuleTitle("");
-      setModuleDescription("");
-
       setStatusMessage(
         "Moduł został utworzony.",
       );
+      setStatusTone("success");
 
       await loadData();
+      return true;
     } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Nie udało się utworzyć modułu.";
-
-      setStatusMessage(message);
+      setStatusMessage(
+        getErrorMessage(
+          error,
+          "Nie udało się utworzyć modułu.",
+        ),
+      );
+      setStatusTone("error");
+      return false;
     } finally {
       setIsSaving(false);
     }
@@ -206,7 +210,7 @@ export default function AdminCoursePage() {
 
   if (isLoading) {
     return (
-      <main className="p-10 text-zinc-400">
+      <main className="text-zinc-400">
         Pobieranie kursu...
       </main>
     );
@@ -214,258 +218,84 @@ export default function AdminCoursePage() {
 
   if (!course) {
     return (
-      <main className="p-10">
+      <main className="text-zinc-300">
         Nie znaleziono kursu.
       </main>
     );
   }
 
   return (
-    <main className="p-10">
+    <main>
       <Link
         href="/admin/courses"
-        className="text-sm text-zinc-400 hover:text-white"
+        className="text-sm text-zinc-400 transition hover:text-zinc-100"
       >
         ← Wróć do kursów
       </Link>
 
-      <div className="mt-6 flex flex-wrap items-start justify-between gap-5">
+      <header className="mt-6 flex flex-wrap items-start justify-between gap-5">
         <div>
-          <p className="text-sm uppercase tracking-[0.2em] text-zinc-500">
+          <p className="text-sm uppercase tracking-[0.2em] text-blue-400">
             Kurs
           </p>
 
-          <h1 className="mt-3 text-4xl font-bold">
+          <h1 className="mt-3 text-4xl font-bold tracking-tight text-zinc-100">
             {course.title}
           </h1>
         </div>
 
         <span
-          className={
+          className={[
+            "rounded-full px-4 py-2 text-sm",
             course.published
-              ? "rounded-full bg-green-500/10 px-4 py-2 text-sm text-green-300"
-              : "rounded-full bg-yellow-500/10 px-4 py-2 text-sm text-yellow-300"
-          }
+              ? "bg-emerald-500/10 text-emerald-300"
+              : "bg-amber-500/10 text-amber-300",
+          ].join(" ")}
         >
           {course.published
             ? "Opublikowany"
             : "Szkic"}
         </span>
-      </div>
+      </header>
 
-      <div className="mt-10 grid gap-8 xl:grid-cols-[1fr_420px]">
-        <div className="space-y-8">
-          <form
-            onSubmit={handleSaveCourse}
-            className="rounded-2xl border border-zinc-800 bg-zinc-950 p-6"
-          >
-            <h2 className="text-xl font-semibold">
-              Ustawienia kursu
-            </h2>
-
-            <div className="mt-6 grid gap-5 md:grid-cols-2">
-              <input
-                value={course.title}
-                onChange={(event) =>
-                  setCourse({
-                    ...course,
-                    title: event.target.value,
-                  })
-                }
-                className="rounded-xl border border-zinc-700 bg-black px-4 py-3"
-                placeholder="Nazwa kursu"
-              />
-
-              <input
-                value={course.slug}
-                onChange={(event) =>
-                  setCourse({
-                    ...course,
-                    slug: event.target.value,
-                  })
-                }
-                className="rounded-xl border border-zinc-700 bg-black px-4 py-3"
-                placeholder="Slug"
-              />
-
-              <select
-                value={course.subject ?? ""}
-                onChange={(event) =>
-                    setCourse({
-                    ...course,
-                    subject:
-                        event.target.value === ""
-                        ? null
-                        : (event.target.value as
-                            | "MATHEMATICS"
-                            | "PHYSICS"
-                            | "COMPUTER_SCIENCE"),
-                    })
-                }
-                className="rounded-xl border border-zinc-700 bg-black px-4 py-3"
-                >
-  <option value="">
-    Wybierz przedmiot
-  </option>
-
-  <option value="MATHEMATICS">
-    Matematyka
-  </option>
-
-  <option value="PHYSICS">
-    Fizyka
-  </option>
-
-  <option value="COMPUTER_SCIENCE">
-    Informatyka
-  </option>
-</select>
-
-        <select
-        value={course.level ?? ""}
-        onChange={(event) =>
-            setCourse({
-            ...course,
-            level:
-                event.target.value === ""
-                ? null
-                : (event.target.value as CourseLevel),
-            })
-        }
-        className="rounded-xl border border-zinc-700 bg-black px-4 py-3"
+      {statusMessage && (
+        <StatusMessage
+          tone={statusTone}
+          className="mt-6"
         >
-        <option value="">
-            Wybierz poziom
-        </option>
+          {statusMessage}
+        </StatusMessage>
+      )}
 
-        <option value="BASIC">
-            Podstawowy
-        </option>
+      <div className="mt-10 grid gap-8 xl:grid-cols-[minmax(0,1fr)_420px]">
+        <div className="space-y-8">
+          <CourseSettingsForm
+            course={course}
+            isSaving={isSaving}
+            onCourseChange={setCourse}
+            onSubmit={handleSaveCourse}
+          />
 
-        <option value="EXTENDED">
-            Rozszerzony
-        </option>
-        </select>
-            </div>
-
-            <textarea
-              value={course.description ?? ""}
-              onChange={(event) =>
-                setCourse({
-                  ...course,
-                  description: event.target.value,
-                })
-              }
-              rows={5}
-              className="mt-5 w-full rounded-xl border border-zinc-700 bg-black px-4 py-3"
-              placeholder="Opis"
-            />
-
-            <label className="mt-5 flex items-center gap-3 text-sm text-zinc-300">
-              <input
-                type="checkbox"
-                checked={course.published ?? false}
-                onChange={(event) =>
-                  setCourse({
-                    ...course,
-                    published: event.target.checked,
-                  })
-                }
-              />
-
-              Kurs opublikowany
-            </label>
-
-            <button
-              type="submit"
-              disabled={isSaving}
-              className="mt-6 rounded-xl bg-white px-6 py-3 font-semibold text-black disabled:opacity-50"
-            >
-              Zapisz kurs
-            </button>
-          </form>
-
-          <section>
-            <h2 className="text-2xl font-semibold">
-              Moduły
-            </h2>
-
-            <div className="mt-5 space-y-4">
-              {modules.length === 0 && (
-                <div className="rounded-2xl border border-dashed border-zinc-700 p-8 text-zinc-400">
-                  Ten kurs nie ma jeszcze modułów.
-                </div>
-              )}
-
-              {modules.map((courseModule) => (
-                <Link
-                  key={courseModule.id}
-                  href={`/admin/modules/${courseModule.id}`}
-                  className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-950 p-5 transition hover:border-zinc-600"
-                >
-                  <div>
-                    <p className="text-sm text-zinc-500">
-                      Moduł {courseModule.order}
-                    </p>
-
-                    <h3 className="mt-1 text-lg font-semibold">
-                      {courseModule.title}
-                    </h3>
-                  </div>
-
-                  <span className="text-sm text-zinc-400">
-                    Edytuj →
-                  </span>
-                </Link>
-              ))}
-            </div>
-          </section>
+          <CourseModulesList
+            modules={modules}
+          />
         </div>
 
-        <form
-          onSubmit={handleCreateModule}
-          className="h-fit rounded-2xl border border-zinc-800 bg-zinc-950 p-6"
-        >
-          <h2 className="text-xl font-semibold">
-            Dodaj moduł
-          </h2>
-
-          <input
-            value={moduleTitle}
-            onChange={(event) =>
-              setModuleTitle(event.target.value)
-            }
-            className="mt-6 w-full rounded-xl border border-zinc-700 bg-black px-4 py-3"
-            placeholder="Nazwa modułu"
-          />
-
-          <textarea
-            value={moduleDescription}
-            onChange={(event) =>
-              setModuleDescription(
-                event.target.value,
-              )
-            }
-            rows={5}
-            className="mt-4 w-full rounded-xl border border-zinc-700 bg-black px-4 py-3"
-            placeholder="Opis modułu"
-          />
-
-          <button
-            type="submit"
-            disabled={isSaving}
-            className="mt-5 w-full rounded-xl bg-white px-5 py-3 font-semibold text-black disabled:opacity-50"
-          >
-            Dodaj moduł
-          </button>
-
-          {statusMessage && (
-            <p className="mt-4 text-sm text-zinc-300">
-              {statusMessage}
-            </p>
-          )}
-        </form>
+        <ModuleCreateForm
+          isSaving={isSaving}
+          onCreate={handleCreateModule}
+        />
       </div>
     </main>
   );
+}
+
+function getErrorMessage(
+  error: unknown,
+  fallback: string,
+): string {
+  return error instanceof Error &&
+    error.message
+    ? error.message
+    : fallback;
 }
