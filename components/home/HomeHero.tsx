@@ -14,16 +14,21 @@ export default function HomeHero() {
         {/* LEWA STRONA */}
         <div className="relative z-10 max-w-xl">
           <h1 className="fade-in text-5xl font-bold leading-[0.98] tracking-tight text-zinc-100 sm:text-6xl lg:text-7xl">
-            Uczę się
+            Kursy z
 
             <span className="mt-2 block text-blue-500">
-              matmy i fizy.
+              matmy, fizy
+               <br />
+              i informatyki
             </span>
           </h1>
 
           <p className="fade-in fade-in-delay-1 mt-7 max-w-lg text-lg leading-8 text-zinc-400 sm:text-xl">
-            Zrozum teorię, rozwiązuj zadania i osiągaj lepsze wyniki
-            na maturze i w szkole.
+            Teoria i zadania.
+            <br />
+            Ucz się w swoim tempie, kiedy chcesz i gdzie chcesz.
+            <br />
+            Osiągaj lepsze wyniki: matury, konkursy, egzaminy.
           </p>
 
           <div className="fade-in fade-in-delay-2 mt-8">

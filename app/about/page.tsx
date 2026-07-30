@@ -11,17 +11,17 @@ const features = [
   {
     title: "Uporządkowana teoria",
     description:
-      "Każda lekcja zawiera najważniejsze definicje, wzory i przykłady przedstawione bez zbędnego komplikowania.",
+      "Każda lekcja zawiera najważniejsze definicje, wzory i przykładowe zadania.",
   },
   {
     title: "Zadania z rozwiązaniami",
     description:
-      "Po teorii możesz samodzielnie rozwiązać zadania, a następnie sprawdzić odpowiedź i pełny tok rozwiązania.",
+      "Po module możesz samodzielnie spróbować rozwiązać zadania, a następnie sprawdzić odpowiedź i przykłądowy tok rozumowania.",
   },
   {
     title: "Nauka we własnym tempie",
     description:
-      "Materiały są podzielone na kursy, moduły i krótkie lekcje, dzięki czemu możesz uczyć się wtedy, kiedy masz czas.",
+      "Materiały są podzielone na kursy, moduły i krótkie lekcje, dzięki czemu możesz uczyć się wtedy, kiedy masz czas. Również na telefonie ;-)",
   },
 ];
 
@@ -36,13 +36,15 @@ export default function AboutPage() {
             </p>
 
             <h1 className="mt-4 text-4xl font-bold tracking-tight text-zinc-100 sm:text-6xl">
-              Nauka bez niepotrzebnego chaosu
+              Uporządkowane lekcje i materiały.
             </h1>
 
             <p className="mt-6 max-w-2xl text-lg leading-8 text-zinc-400">
-              Platforma powstała po to, aby trudne zagadnienia z matematyki,
-              fizyki i informatyki przedstawiać w prosty, logiczny i
-              uporządkowany sposób.
+              Podczas prowadzonych przeze mnie korepetycji wielokrotnie spotykałem
+              uczniów, którzy mimo dużego potencjału i ciekawości nie mieli
+              odpowiednich warunków do rozwoju. Dlatego chcę stworzyć miejsce,
+              w którym każdy może rozwijać swoje umiejętności i poszerzać wiedzę
+              we własnym tempie.
             </p>
           </div>
         </div>
@@ -56,27 +58,31 @@ export default function AboutPage() {
             </p>
 
             <h2 className="mt-3 text-3xl font-bold tracking-tight text-zinc-100">
-              Zrozumienie jest ważniejsze niż zapamiętywanie
+              Zrozumienie jest ważniejsze niż zapamiętywanie  -  
+              szczególnie w czasach AI.
             </h2>
           </div>
 
           <div className="space-y-6 text-base leading-8 text-zinc-400">
             <p>
-              Wiele materiałów edukacyjnych pokazuje jedynie gotowe wzory lub
-              rozwiązania. Tutaj celem jest pokazanie, skąd wynikają kolejne
-              kroki i dlaczego dana metoda działa.
+              Wciąż jedną z głównych metod nauki wielu uczniów jest tak zwana
+              „nauka na zaliczenie”. Polega ona na zapamiętywaniu schematów,
+              najczęściej tuż przed sprawdzianem, bez próby głębszego zrozumienia
+              materiału.
+            </p>
+
+            <p>
+              Taka wiedza szybko zanika, a uczeń często nie dostrzega, że kolejne
+              zagadnienia opierają się na tych poznanych wcześniej. Z czasem może
+              to osłabiać ciekawość, kreatywność i motywację do nauki - cechy
+              szczególnie ważne w erze AI, w której samo odtwarzanie informacji
+              przestaje być wystarczające.
             </p>
 
             <p>
               Każdy kurs jest podzielony na moduły, a moduły na lekcje.
-              Dzięki temu możesz skupić się na jednym zagadnieniu, zamiast
-              przeglądać długie i nieuporządkowane materiały.
-            </p>
-
-            <p>
-              Platforma jest rozwijana stopniowo. Z czasem pojawią się kolejne
-              kursy, zadania, materiały dodatkowe oraz funkcje pozwalające
-              śledzić postępy w nauce.
+              Dzięki temu możesz skupić się na jednym zagadnieniu a następnie przećwiczyć je
+              w zadaniach.
             </p>
           </div>
         </div>

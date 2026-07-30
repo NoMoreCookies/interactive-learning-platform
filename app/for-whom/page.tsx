@@ -11,7 +11,7 @@ const audiences = [
   {
     title: "Dla maturzystów",
     description:
-      "Dla osób przygotowujących się do matury podstawowej lub rozszerzonej, które potrzebują uporządkowanej teorii i praktycznych zadań.",
+      "Dla osób przygotowujących się do matury podstawowej jak i rozszerzonej",
   },
   {
     title: "Dla uczniów szkół średnich",
@@ -21,19 +21,18 @@ const audiences = [
   {
     title: "Dla osób uczących się samodzielnie",
     description:
-      "Dla każdego, kto chce rozwijać swoje umiejętności bez sztywnego planu i uczyć się we własnym tempie.",
+      "Dla osób, które chcą samodzielnie rozwijać swoje umiejętności i uczyć się we własnym tempie.",
   },
   {
-    title: "Dla początkujących programistów",
+    title: "Dla studentów",
     description:
-      "Dla osób rozpoczynających naukę programowania i algorytmiki, które potrzebują jasnego wprowadzenia do podstaw.",
+      "Dla studentów kierunków ścisłych, którzy chcą powtórzyć lub uzupełnić  materiał.",
   },
 ];
 
 const expectations = [
   "Chcesz zrozumieć materiał, a nie tylko zapamiętać wzory.",
   "Potrzebujesz kursu podzielonego na krótkie i konkretne lekcje.",
-  "Lubisz sprawdzać wiedzę za pomocą zadań.",
   "Chcesz mieć dostęp do odpowiedzi i pełnych rozwiązań.",
   "Szukasz materiałów, do których możesz wracać w dowolnym momencie.",
 ];
@@ -45,17 +44,16 @@ export default function ForWhomPage() {
         <div className="mx-auto max-w-6xl px-6 py-20 sm:py-28">
           <div className="max-w-3xl">
             <p className="text-sm font-medium uppercase tracking-widest text-blue-400">
-              Dla kogo
+              Dla kogo ?
             </p>
 
             <h1 className="mt-4 text-4xl font-bold tracking-tight text-zinc-100 sm:text-6xl">
-              Kursy stworzone dla osób, które chcą naprawdę zrozumieć materiał
+              Dla każdego, kto chce się uczyć.
             </h1>
 
             <p className="mt-6 max-w-2xl text-lg leading-8 text-zinc-400">
-              Nie musisz być najlepszy w klasie ani znać wszystkich podstaw.
-              Najważniejsza jest chęć systematycznej nauki i rozwiązywania
-              zadań.
+              Nie musisz być najlepszy w klasie ani na roku i nie musisz znać wszystkich podstaw.
+              Najważniejsze są systematyczność, ciekawość i chęć zrozumienia.
             </p>
           </div>
         </div>

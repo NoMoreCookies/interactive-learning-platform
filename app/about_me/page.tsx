@@ -11,8 +11,12 @@ const achievements = [
     label: "z matematyki rozszerzonej",
   },
   {
-    value: "90%",
+    value: "88%",
     label: "z fizyki rozszerzonej",
+  },
+  {
+    value: "86%",
+    label: "z informatyki rozszerzonej",
   },
 ];
 
@@ -31,33 +35,18 @@ export default function AboutPage() {
             </h1>
 
             <p className="mt-6 max-w-2xl text-lg leading-8 text-zinc-300">
-              Od kilku lat pomagam uczniom przygotować się do matury
-              rozszerzonej z matematyki i fizyki. Zależy mi na tym, aby trudne
-              zagadnienia tłumaczyć jasno, logicznie i bez niepotrzebnego
-              komplikowania.
+              Od ponad 6 lat pomagam uczniom przygotować się do matury
+              rozszerzonej z matematyki, fizyki oraz informatyki.
+              Mam również doświadczenie w egzaminach ósmoklasisty i konkursach.
             </p>
 
             <p className="mt-4 max-w-2xl text-base leading-7 text-zinc-400">
-              Stworzyłem tę platformę, ponieważ chciałem zebrać w jednym miejscu
-              uporządkowane lekcje, zadania, notatki i materiały, do których
-              można wracać w dowolnym momencie.
+              Stworzyłem tę platformę, aby zebrać w jednym miejscu uporządkowane
+              lekcje, zadania, notatki i materiały, z których regularnie korzystałem
+              podczas prowadzonych zajęć.
             </p>
 
-            <div className="mt-8 flex flex-wrap gap-4">
-              <Link
-                href="/courses"
-                className="rounded-xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white transition hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:ring-offset-2 focus:ring-offset-[#020617]"
-              >
-                Zobacz kursy
-              </Link>
 
-              <Link
-                href="/kontakt"
-                className="rounded-xl border border-zinc-700 bg-zinc-900/60 px-6 py-3 text-sm font-semibold text-zinc-100 transition hover:border-zinc-600 hover:bg-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-500 focus:ring-offset-2 focus:ring-offset-[#020617]"
-              >
-                Kontakt
-              </Link>
-            </div>
           </div>
 
           <div className="relative mx-auto w-full max-w-md">
