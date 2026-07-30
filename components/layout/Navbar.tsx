@@ -44,6 +44,15 @@ export default function Navbar() {
             Dla kogo?
           </Link>
 
+
+          <Link
+            href="/about_me"
+            className="transition-colors hover:text-white"
+          >
+            O mnie
+          </Link>
+
+
           <Link
             href="/#kontakt"
             className="transition-colors hover:text-white"
