@@ -11,11 +11,17 @@ import AuthSidebar from "./AuthSidebar";
 import ConfirmSignUpForm from "./ConfirmSignUpForm";
 import LoginForm from "./LoginForm";
 import RegisterForm from "./RegisterForm";
+import ResetPasswordForm from "./ResetPasswordForm";
 
 type AuthMode =
   | "login"
   | "register"
-  | "confirm";
+  | "confirm"
+  | "reset-password";
+
+type ConfirmationOrigin =
+  | "login"
+  | "register";
 
 export default function AuthPanel() {
   const [mode, setMode] =
@@ -26,6 +32,14 @@ export default function AuthPanel() {
     setRegisteredEmail,
   ] = useState("");
 
+  const [
+    confirmationOrigin,
+    setConfirmationOrigin,
+  ] =
+    useState<ConfirmationOrigin>(
+      "register",
+    );
+
   function showLogin() {
     setMode("login");
   }
@@ -34,12 +48,49 @@ export default function AuthPanel() {
     setMode("register");
   }
 
-  function showConfirmation(
+  function showResetPassword(
     email: string,
   ) {
     setRegisteredEmail(email);
+    setMode("reset-password");
+  }
+
+  function showConfirmationFromLogin(
+    email: string,
+  ) {
+    setRegisteredEmail(email);
+    setConfirmationOrigin("login");
     setMode("confirm");
   }
+
+  function showConfirmationFromRegister(
+    email: string,
+  ) {
+    setRegisteredEmail(email);
+    setConfirmationOrigin(
+      "register",
+    );
+    setMode("confirm");
+  }
+
+  function handleConfirmationBack() {
+    setMode(confirmationOrigin);
+  }
+
+  function handleConfirmed() {
+    setMode("login");
+  }
+
+  function handlePasswordReset(
+    email: string,
+  ) {
+    setRegisteredEmail(email);
+    setMode("login");
+  }
+
+  const showAuthTabs =
+    mode === "login" ||
+    mode === "register";
 
   return (
     <main className="min-h-screen bg-[#020617] text-zinc-100">
@@ -54,7 +105,7 @@ export default function AuthPanel() {
             variant="elevated"
             className="w-full max-w-md p-6 sm:p-8"
           >
-            {mode !== "confirm" && (
+            {showAuthTabs && (
               <div
                 role="tablist"
                 aria-label="Tryb uwierzytelniania"
@@ -106,6 +157,12 @@ export default function AuthPanel() {
                 onRegisterClick={
                   showRegister
                 }
+                onConfirmRequired={
+                  showConfirmationFromLogin
+                }
+                onForgotPasswordClick={
+                  showResetPassword
+                }
               />
             )}
 
@@ -113,7 +170,7 @@ export default function AuthPanel() {
               <RegisterForm
                 onLoginClick={showLogin}
                 onConfirmationRequired={
-                  showConfirmation
+                  showConfirmationFromRegister
                 }
               />
             )}
@@ -121,8 +178,25 @@ export default function AuthPanel() {
             {mode === "confirm" && (
               <ConfirmSignUpForm
                 email={registeredEmail}
-                onBack={showRegister}
-                onConfirmed={showLogin}
+                onBack={
+                  handleConfirmationBack
+                }
+                onConfirmed={
+                  handleConfirmed
+                }
+              />
+            )}
+
+            {mode ===
+              "reset-password" && (
+              <ResetPasswordForm
+                defaultEmail={
+                  registeredEmail
+                }
+                onBack={showLogin}
+                onPasswordReset={
+                  handlePasswordReset
+                }
               />
             )}
           </Surface>

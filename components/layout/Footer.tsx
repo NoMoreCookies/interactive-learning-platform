@@ -1,7 +1,9 @@
 import Link from "next/link";
 
+
 export default function Footer() {
   const currentYear = new Date().getFullYear();
+
 
   return (
     <footer
@@ -18,16 +20,19 @@ export default function Footer() {
               Po prostu nauka
             </Link>
 
+
             <p className="mt-4 text-sm leading-7 text-zinc-400">
               Matematyka, fizyka i informatyka wyjaśnione w prosty,
               uporządkowany i praktyczny sposób.
             </p>
           </div>
 
+
           <div className="md:justify-self-end md:text-right">
             <h2 className="text-sm font-semibold uppercase tracking-widest text-zinc-300">
               Kontakt
             </h2>
+
 
             <div className="mt-4 space-y-3 text-sm text-zinc-400">
               <a
@@ -37,6 +42,7 @@ export default function Footer() {
                 kontakt@twojadomena.pl
               </a>
 
+
               <p className="max-w-sm">
                 Masz pytanie dotyczące kursu lub materiałów? Napisz do mnie.
               </p>
@@ -44,12 +50,39 @@ export default function Footer() {
           </div>
         </div>
 
-        <div className="mt-10 flex flex-col gap-3 border-t border-zinc-800 pt-6 text-sm text-zinc-500 sm:flex-row sm:items-center sm:justify-between">
-          <p>
-            © {currentYear} Po prostu nauka. Wszystkie prawa zastrzeżone.
-          </p>
 
-          <p>Matematyka • Fizyka • Informatyka</p>
+        <div className="mt-10 border-t border-zinc-800 pt-6">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm text-zinc-500">
+              © {currentYear} Po prostu nauka. Wszystkie prawa zastrzeżone.
+            </p>
+
+
+            <nav
+              aria-label="Dokumenty prawne"
+              className="flex flex-wrap gap-x-5 gap-y-2 text-sm"
+            >
+              <Link
+                href="/termsAndConditions"
+                className="text-zinc-500 transition-colors hover:text-zinc-200"
+              >
+                Regulamin
+              </Link>
+
+
+              <Link
+                href="/privacyPolicy"
+                className="text-zinc-500 transition-colors hover:text-zinc-200"
+              >
+                Polityka prywatności i cookies
+              </Link>
+            </nav>
+          </div>
+
+
+          <p className="mt-4 text-sm text-zinc-500 sm:text-right">
+            Matematyka • Fizyka • Informatyka
+          </p>
         </div>
       </div>
     </footer>

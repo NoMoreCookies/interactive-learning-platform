@@ -1,9 +1,6 @@
 "use client";
 
-import {
-  type FormEvent,
-  useState,
-} from "react";
+import { type FormEvent, useState } from "react";
 
 import {
   fetchAuthSession,
@@ -23,11 +20,15 @@ import {
 type LoginFormProps = {
   defaultEmail?: string;
   onRegisterClick: () => void;
+  onConfirmRequired: (email: string) => void;
+  onForgotPasswordClick: (email: string) => void;
 };
 
 export default function LoginForm({
   defaultEmail = "",
   onRegisterClick,
+  onConfirmRequired,
+  onForgotPasswordClick,
 }: LoginFormProps) {
   const router = useRouter();
   const { refreshAuth } = useAuth();
@@ -54,15 +55,28 @@ export default function LoginForm({
   ) {
     event.preventDefault();
 
+    const normalizedEmail =
+      normalizeEmail(email);
+
     setError("");
     setIsLoading(true);
 
     try {
       const result = await signIn({
-        username:
-          email.trim().toLowerCase(),
+        username: normalizedEmail,
         password,
       });
+
+      if (
+        result.nextStep.signInStep ===
+        "CONFIRM_SIGN_UP"
+      ) {
+        setPassword("");
+        onConfirmRequired(
+          normalizedEmail,
+        );
+        return;
+      }
 
       if (!result.isSignedIn) {
         setError(
@@ -100,6 +114,18 @@ export default function LoginForm({
 
       router.refresh();
     } catch (caughtError) {
+      if (
+        isUserNotConfirmedError(
+          caughtError,
+        )
+      ) {
+        setPassword("");
+        onConfirmRequired(
+          normalizedEmail,
+        );
+        return;
+      }
+
       setError(
         getLoginErrorMessage(
           caughtError,
@@ -108,6 +134,14 @@ export default function LoginForm({
     } finally {
       setIsLoading(false);
     }
+  }
+
+  function handleForgotPassword() {
+    setError("");
+
+    onForgotPasswordClick(
+      normalizeEmail(email),
+    );
   }
 
   return (
@@ -137,7 +171,9 @@ export default function LoginForm({
             autoComplete="email"
             value={email}
             onChange={(event) =>
-              setEmail(event.target.value)
+              setEmail(
+                event.target.value,
+              )
             }
             placeholder="Wpisz swój e-mail"
             required
@@ -145,52 +181,68 @@ export default function LoginForm({
           />
         </FormField>
 
-        <FormField
-          htmlFor="login-password"
-          label="Hasło"
-        >
-          <div className="relative">
-            <Input
-              id="login-password"
-              type={
-                showPassword
-                  ? "text"
-                  : "password"
-              }
-              autoComplete="current-password"
-              value={password}
-              onChange={(event) =>
-                setPassword(
-                  event.target.value,
-                )
-              }
-              placeholder="Wpisz swoje hasło"
-              required
-              disabled={isLoading}
-              className="pr-20"
-            />
+        <div>
+          <FormField
+            htmlFor="login-password"
+            label="Hasło"
+          >
+            <div className="relative">
+              <Input
+                id="login-password"
+                type={
+                  showPassword
+                    ? "text"
+                    : "password"
+                }
+                autoComplete="current-password"
+                value={password}
+                onChange={(event) =>
+                  setPassword(
+                    event.target.value,
+                  )
+                }
+                placeholder="Wpisz swoje hasło"
+                required
+                disabled={isLoading}
+                className="pr-20"
+              />
 
+              <button
+                type="button"
+                onClick={() =>
+                  setShowPassword(
+                    (current) =>
+                      !current,
+                  )
+                }
+                disabled={isLoading}
+                className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-semibold text-zinc-400 transition-colors hover:text-zinc-100 disabled:opacity-50"
+                aria-label={
+                  showPassword
+                    ? "Ukryj hasło"
+                    : "Pokaż hasło"
+                }
+              >
+                {showPassword
+                  ? "Ukryj"
+                  : "Pokaż"}
+              </button>
+            </div>
+          </FormField>
+
+          <div className="mt-2 text-right">
             <button
               type="button"
-              onClick={() =>
-                setShowPassword(
-                  (current) => !current,
-                )
+              onClick={
+                handleForgotPassword
               }
               disabled={isLoading}
-              className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-semibold text-zinc-400 transition-colors hover:text-zinc-100 disabled:opacity-50"
-              aria-label={
-                showPassword
-                  ? "Ukryj hasło"
-                  : "Pokaż hasło"
-              }
+              className="text-sm font-semibold text-blue-400 transition-colors hover:text-blue-300 disabled:opacity-50"
             >
-              {showPassword
-                ? "Ukryj"
-                : "Pokaż"}
+              Nie pamiętasz hasła?
             </button>
           </div>
-        </FormField>
+        </div>
 
         {error && (
           <StatusMessage tone="error">
@@ -224,6 +276,22 @@ export default function LoginForm({
   );
 }
 
+function normalizeEmail(
+  email: string,
+): string {
+  return email.trim().toLowerCase();
+}
+
+function isUserNotConfirmedError(
+  error: unknown,
+): boolean {
+  return (
+    error instanceof Error &&
+    error.name ===
+      "UserNotConfirmedException"
+  );
+}
+
 function getLoginErrorMessage(
   error: unknown,
 ): string {
@@ -236,10 +304,8 @@ function getLoginErrorMessage(
     case "NotAuthorizedException":
       return "Nieprawidłowy adres e-mail lub hasło.";
 
-    case "UserNotConfirmedException":
-      return "Konto nie zostało jeszcze potwierdzone.";
-
     case "LimitExceededException":
+    case "TooManyRequestsException":
       return "Wykonano zbyt wiele prób. Spróbuj ponownie później.";
 
     default:

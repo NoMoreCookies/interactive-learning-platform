@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 import {
   type FormEvent,
   useMemo,
@@ -7,6 +9,11 @@ import {
 } from "react";
 
 import { signUp } from "aws-amplify/auth";
+
+import {
+  CURRENT_PRIVACY_VERSION,
+  CURRENT_TERMS_VERSION,
+} from "@/lib/legal";
 
 import {
   Button,
@@ -52,6 +59,11 @@ export default function RegisterForm({
   const [
     showRepeatedPassword,
     setShowRepeatedPassword,
+  ] = useState(false);
+
+  const [
+    acceptedTerms,
+    setAcceptedTerms,
   ] = useState(false);
 
   const [error, setError] =
@@ -105,11 +117,21 @@ export default function RegisterForm({
       return;
     }
 
+    if (!acceptedTerms) {
+      setError(
+        "Aby utworzyć konto, zaakceptuj Regulamin i potwierdź zapoznanie się z Polityką prywatności.",
+      );
+      return;
+    }
+
     setIsLoading(true);
 
     try {
       const normalizedEmail =
         email.trim().toLowerCase();
+
+      const legalAcceptedAt =
+        new Date().toISOString();
 
       const result = await signUp({
         username: normalizedEmail,
@@ -117,6 +139,15 @@ export default function RegisterForm({
         options: {
           userAttributes: {
             email: normalizedEmail,
+
+            "custom:terms_version":
+              CURRENT_TERMS_VERSION,
+
+            "custom:privacy_version":
+              CURRENT_PRIVACY_VERSION,
+
+            "custom:legal_accepted_at":
+              legalAcceptedAt,
           },
         },
       });
@@ -273,6 +304,49 @@ export default function RegisterForm({
             }
             label="Znak specjalny"
           />
+        </div>
+
+        <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
+          <div className="flex items-start gap-3">
+            <input
+              id="register-terms"
+              type="checkbox"
+              checked={acceptedTerms}
+              onChange={(event) =>
+                setAcceptedTerms(
+                  event.target.checked,
+                )
+              }
+              required
+              disabled={isLoading}
+              className="mt-1 h-4 w-4 shrink-0 cursor-pointer rounded border-zinc-700 bg-zinc-900 accent-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+            />
+
+            <label
+              htmlFor="register-terms"
+              className="text-sm leading-6 text-zinc-400"
+            >
+              Akceptuję{" "}
+              <Link
+                href="/termsAndConditions"
+                target="_blank"
+                className="font-medium text-blue-400 transition-colors hover:text-blue-300 hover:underline"
+              >
+                Regulamin
+              </Link>{" "}
+              oraz potwierdzam zapoznanie
+              się z{" "}
+              <Link
+                href="/privacyPolicy"
+                target="_blank"
+                className="font-medium text-blue-400 transition-colors hover:text-blue-300 hover:underline"
+              >
+                Polityką prywatności
+                i cookies
+              </Link>
+              .
+            </label>
+          </div>
         </div>
 
         {error && (
