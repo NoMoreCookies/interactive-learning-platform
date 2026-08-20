@@ -1,14 +1,28 @@
 "use client";
 
-import { useState } from "react";
+import {
+  useEffect,
+  useState,
+} from "react";
+
+import { useRouter } from "next/navigation";
+
+import { useAuth } from "@/components/auth/AuthProvider";
 
 import {
   PageContainer,
   Surface,
 } from "@/components/ui";
 
+import {
+  acceptCurrentLegal,
+  getLegalUpdateRequirement,
+  type LegalUpdateRequirement,
+} from "@/lib/legal-acceptance";
+
 import AuthSidebar from "./AuthSidebar";
 import ConfirmSignUpForm from "./ConfirmSignUpForm";
+import LegalUpdateModal from "./LegalUpdateModal";
 import LoginForm from "./LoginForm";
 import RegisterForm from "./RegisterForm";
 import ResetPasswordForm from "./ResetPasswordForm";
@@ -23,7 +37,21 @@ type ConfirmationOrigin =
   | "login"
   | "register";
 
+type RequiredLegalUpdate = Exclude<
+  LegalUpdateRequirement,
+  "none"
+>;
+
 export default function AuthPanel() {
+  const router = useRouter();
+
+  const {
+    isAuthenticated,
+    isAdmin,
+    isLoading: isAuthLoading,
+    logout,
+  } = useAuth();
+
   const [mode, setMode] =
     useState<AuthMode>("login");
 
@@ -39,6 +67,103 @@ export default function AuthPanel() {
     useState<ConfirmationOrigin>(
       "register",
     );
+
+  const [
+    legalRequirement,
+    setLegalRequirement,
+  ] =
+    useState<RequiredLegalUpdate | null>(
+      null,
+    );
+
+  const [
+    isAcceptingLegal,
+    setIsAcceptingLegal,
+  ] = useState(false);
+
+  const [
+    legalError,
+    setLegalError,
+  ] = useState("");
+
+  useEffect(() => {
+    if (isAuthLoading) {
+      return;
+    }
+
+    const params =
+      new URLSearchParams(
+        window.location.search,
+      );
+
+    const legalCheckRequired =
+      params.get("legal") ===
+      "required";
+
+    if (!legalCheckRequired) {
+      return;
+    }
+
+    if (!isAuthenticated) {
+      router.replace("/auth");
+      return;
+    }
+
+    let isCancelled = false;
+
+    async function checkLegalDocuments() {
+      try {
+        const requirement =
+          await getLegalUpdateRequirement();
+
+        if (isCancelled) {
+          return;
+        }
+
+        if (requirement === "none") {
+          router.replace(
+            isAdmin
+              ? "/admin"
+              : "/account",
+          );
+
+          return;
+        }
+
+        setLegalRequirement(
+          requirement,
+        );
+      } catch (error) {
+        console.error(
+          "Failed to check legal documents:",
+          error,
+        );
+
+        if (isCancelled) {
+          return;
+        }
+
+        try {
+          await logout();
+        } finally {
+          router.replace("/auth");
+          router.refresh();
+        }
+      }
+    }
+
+    void checkLegalDocuments();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [
+    isAuthenticated,
+    isAdmin,
+    isAuthLoading,
+    logout,
+    router,
+  ]);
 
   function showLogin() {
     setMode("login");
@@ -88,120 +213,213 @@ export default function AuthPanel() {
     setMode("login");
   }
 
+  async function handleLegalAccept() {
+    if (!legalRequirement) {
+      return;
+    }
+
+    setLegalError("");
+    setIsAcceptingLegal(true);
+
+    try {
+      await acceptCurrentLegal();
+
+      const requirementAfterAcceptance =
+        await getLegalUpdateRequirement();
+
+      if (
+        requirementAfterAcceptance !==
+        "none"
+      ) {
+        setLegalRequirement(
+          requirementAfterAcceptance,
+        );
+
+        setLegalError(
+          "Nie udało się potwierdzić aktualnej wersji dokumentów. Spróbuj ponownie.",
+        );
+
+        return;
+      }
+
+      setLegalRequirement(null);
+
+      router.replace(
+        isAdmin
+          ? "/admin"
+          : "/account",
+      );
+
+      router.refresh();
+    } catch (error) {
+      console.error(
+        "Failed to accept legal documents:",
+        error,
+      );
+
+      setLegalError(
+        "Nie udało się zapisać akceptacji dokumentów. Spróbuj ponownie.",
+      );
+    } finally {
+      setIsAcceptingLegal(false);
+    }
+  }
+
+  async function handleLegalLogout() {
+    setLegalError("");
+    setIsAcceptingLegal(true);
+
+    try {
+      await logout();
+
+      setLegalRequirement(null);
+
+      router.replace("/auth");
+      router.refresh();
+    } finally {
+      setIsAcceptingLegal(false);
+    }
+  }
+
   const showAuthTabs =
     mode === "login" ||
     mode === "register";
 
   return (
-    <main className="min-h-screen bg-[#020617] text-zinc-100">
-      <PageContainer
-        size="default"
-        className="grid min-h-screen grid-cols-1 lg:grid-cols-[0.8fr_1.2fr]"
-      >
-        <AuthSidebar />
+    <>
+      <main className="min-h-screen bg-[#020617] text-zinc-100">
+        <PageContainer
+          size="default"
+          className="grid min-h-screen grid-cols-1 lg:grid-cols-[0.8fr_1.2fr]"
+        >
+          <AuthSidebar />
 
-        <section className="flex items-center justify-center py-12 lg:pl-12">
-          <Surface
-            variant="elevated"
-            className="w-full max-w-md p-6 sm:p-8"
-          >
-            {showAuthTabs && (
-              <div
-                role="tablist"
-                aria-label="Tryb uwierzytelniania"
-                className="mb-8 grid grid-cols-2 border-b border-zinc-800"
-              >
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={
-                    mode === "login"
-                  }
-                  onClick={showLogin}
-                  className={[
-                    "border-b-2 px-4 py-3 text-sm font-semibold transition-colors",
-                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset",
-                    mode === "login"
-                      ? "border-blue-500 text-blue-400"
-                      : "border-transparent text-zinc-500 hover:text-zinc-200",
-                  ].join(" ")}
+          <section className="flex items-center justify-center py-12 lg:pl-12">
+            <Surface
+              variant="elevated"
+              className="w-full max-w-md p-6 sm:p-8"
+            >
+              {showAuthTabs && (
+                <div
+                  role="tablist"
+                  aria-label="Tryb uwierzytelniania"
+                  className="mb-8 grid grid-cols-2 border-b border-zinc-800"
                 >
-                  Logowanie
-                </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={
+                      mode === "login"
+                    }
+                    onClick={showLogin}
+                    className={[
+                      "border-b-2 px-4 py-3 text-sm font-semibold transition-colors",
+                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset",
+                      mode === "login"
+                        ? "border-blue-500 text-blue-400"
+                        : "border-transparent text-zinc-500 hover:text-zinc-200",
+                    ].join(" ")}
+                  >
+                    Logowanie
+                  </button>
 
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={
-                    mode === "register"
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={
+                      mode ===
+                      "register"
+                    }
+                    onClick={showRegister}
+                    className={[
+                      "border-b-2 px-4 py-3 text-sm font-semibold transition-colors",
+                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset",
+                      mode === "register"
+                        ? "border-blue-500 text-blue-400"
+                        : "border-transparent text-zinc-500 hover:text-zinc-200",
+                    ].join(" ")}
+                  >
+                    Rejestracja
+                  </button>
+                </div>
+              )}
+
+              {mode === "login" && (
+                <LoginForm
+                  defaultEmail={
+                    registeredEmail
                   }
-                  onClick={showRegister}
-                  className={[
-                    "border-b-2 px-4 py-3 text-sm font-semibold transition-colors",
-                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset",
-                    mode === "register"
-                      ? "border-blue-500 text-blue-400"
-                      : "border-transparent text-zinc-500 hover:text-zinc-200",
-                  ].join(" ")}
-                >
-                  Rejestracja
-                </button>
-              </div>
-            )}
+                  onRegisterClick={
+                    showRegister
+                  }
+                  onConfirmRequired={
+                    showConfirmationFromLogin
+                  }
+                  onForgotPasswordClick={
+                    showResetPassword
+                  }
+                />
+              )}
 
-            {mode === "login" && (
-              <LoginForm
-                defaultEmail={
-                  registeredEmail
-                }
-                onRegisterClick={
-                  showRegister
-                }
-                onConfirmRequired={
-                  showConfirmationFromLogin
-                }
-                onForgotPasswordClick={
-                  showResetPassword
-                }
-              />
-            )}
+              {mode === "register" && (
+                <RegisterForm
+                  onLoginClick={
+                    showLogin
+                  }
+                  onConfirmationRequired={
+                    showConfirmationFromRegister
+                  }
+                />
+              )}
 
-            {mode === "register" && (
-              <RegisterForm
-                onLoginClick={showLogin}
-                onConfirmationRequired={
-                  showConfirmationFromRegister
-                }
-              />
-            )}
+              {mode === "confirm" && (
+                <ConfirmSignUpForm
+                  email={
+                    registeredEmail
+                  }
+                  onBack={
+                    handleConfirmationBack
+                  }
+                  onConfirmed={
+                    handleConfirmed
+                  }
+                />
+              )}
 
-            {mode === "confirm" && (
-              <ConfirmSignUpForm
-                email={registeredEmail}
-                onBack={
-                  handleConfirmationBack
-                }
-                onConfirmed={
-                  handleConfirmed
-                }
-              />
-            )}
+              {mode ===
+                "reset-password" && (
+                <ResetPasswordForm
+                  defaultEmail={
+                    registeredEmail
+                  }
+                  onBack={showLogin}
+                  onPasswordReset={
+                    handlePasswordReset
+                  }
+                />
+              )}
+            </Surface>
+          </section>
+        </PageContainer>
+      </main>
 
-            {mode ===
-              "reset-password" && (
-              <ResetPasswordForm
-                defaultEmail={
-                  registeredEmail
-                }
-                onBack={showLogin}
-                onPasswordReset={
-                  handlePasswordReset
-                }
-              />
-            )}
-          </Surface>
-        </section>
-      </PageContainer>
-    </main>
+      {legalRequirement && (
+        <LegalUpdateModal
+          requirement={
+            legalRequirement
+          }
+          isSubmitting={
+            isAcceptingLegal
+          }
+          error={legalError}
+          onAccept={
+            handleLegalAccept
+          }
+          onLogout={
+            handleLegalLogout
+          }
+        />
+      )}
+    </>
   );
 }

@@ -1,14 +1,17 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import {
+  Geist,
+  Geist_Mono,
+} from "next/font/google";
 
+import AuthProvider from "@/components/auth/AuthProvider";
+import LegalAccessGuard from "@/components/auth/LegalAccessGuard";
+import ConfigureAmplify from "@/components/ConfigureAmplify";
 import Footer from "@/components/layout/Footer";
 import Navbar from "@/components/layout/Navbar";
-import ConfigureAmplify from "@/components/ConfigureAmplify";
 
 import "./globals.css";
 import "katex/dist/katex.min.css";
-
-import AuthProvider from "@/components/auth/AuthProvider";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -22,7 +25,8 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: {
-    default: "Kursy — matematyka, fizyka i informatyka",
+    default:
+      "Kursy — matematyka, fizyka i informatyka",
     template: "%s | Kursy",
   },
   description:
@@ -40,17 +44,19 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="flex min-h-full flex-col bg-[#020617] text-zinc-100">
-      <ConfigureAmplify />
+        <ConfigureAmplify />
 
-      <AuthProvider>
-        <Navbar />
+        <AuthProvider>
+          <LegalAccessGuard>
+            <Navbar />
 
-        <main className="flex-1">
-          {children}
-        </main>
-      </AuthProvider>
+            <main className="flex-1">
+              {children}
+            </main>
 
-        <Footer />
+            <Footer />
+          </LegalAccessGuard>
+        </AuthProvider>
       </body>
     </html>
   );

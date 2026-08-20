@@ -2,9 +2,17 @@ import {
   type ClientSchema,
   a,
   defineData,
+  defineFunction,
 } from "@aws-amplify/backend";
 
 import { postConfirmation } from "../auth/post-confirmation/resource";
+
+const acceptCurrentLegal =
+  defineFunction({
+    name: "accept-current-legal",
+    entry:
+      "./accept-current-legal/handler.ts",
+  });
 
 const schema = a
   .schema({
@@ -180,9 +188,25 @@ const schema = a
           .group("ADMIN")
           .to(["read"]),
       ]),
+
+    acceptCurrentLegal: a
+      .mutation()
+      .returns(a.string())
+      .authorization((allow) => [
+        allow.authenticated(),
+      ])
+      .handler(
+        a.handler.function(
+          acceptCurrentLegal,
+        ),
+      ),
   })
   .authorization((allow) => [
     allow.resource(postConfirmation),
+
+    allow
+      .resource(acceptCurrentLegal)
+      .to(["mutate"]),
   ]);
 
 export type Schema =
