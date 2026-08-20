@@ -9,27 +9,14 @@ import {
   getAmplifyDataClientConfig,
 } from "@aws-amplify/backend/function/runtime";
 
-import type { Schema } from "../../data/resource";
+import { env } from "$amplify/env/post-confirmation";
 
-const dataClientEnv = {
-  AWS_ACCESS_KEY_ID:
-    process.env.AWS_ACCESS_KEY_ID!,
-  AWS_SECRET_ACCESS_KEY:
-    process.env.AWS_SECRET_ACCESS_KEY!,
-  AWS_SESSION_TOKEN:
-    process.env.AWS_SESSION_TOKEN!,
-  AWS_REGION:
-    process.env.AWS_REGION!,
-  AMPLIFY_DATA_DEFAULT_NAME:
-    process.env.AMPLIFY_DATA_DEFAULT_NAME!,
-};
+import type { Schema } from "../../data/resource";
 
 const {
   resourceConfig,
   libraryOptions,
-} = await getAmplifyDataClientConfig(
-  dataClientEnv,
-);
+} = await getAmplifyDataClientConfig(env);
 
 Amplify.configure(
   resourceConfig,
