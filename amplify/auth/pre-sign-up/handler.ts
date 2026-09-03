@@ -5,7 +5,7 @@ import type {
 import {
   CURRENT_PRIVACY_VERSION,
   CURRENT_TERMS_VERSION,
-} from "../../../lib/legal";
+} from "../../shared/legal-versions";
 
 export const handler: PreSignUpTriggerHandler =
   async (event) => {
@@ -18,9 +18,6 @@ export const handler: PreSignUpTriggerHandler =
     const privacyVersion =
       attributes["custom:privacy_version"];
 
-    const legalAcceptedAt =
-      attributes["custom:legal_accepted_at"];
-
     if (!termsVersion) {
       throw new Error(
         "Brak informacji o zaakceptowanej wersji Regulaminu.",
@@ -30,12 +27,6 @@ export const handler: PreSignUpTriggerHandler =
     if (!privacyVersion) {
       throw new Error(
         "Brak informacji o wersji Polityki prywatności.",
-      );
-    }
-
-    if (!legalAcceptedAt) {
-      throw new Error(
-        "Brak informacji o dacie akceptacji dokumentów.",
       );
     }
 
@@ -54,19 +45,6 @@ export const handler: PreSignUpTriggerHandler =
     ) {
       throw new Error(
         "Nieprawidłowa wersja Polityki prywatności.",
-      );
-    }
-
-    const acceptedAtTimestamp =
-      Date.parse(legalAcceptedAt);
-
-    if (
-      Number.isNaN(
-        acceptedAtTimestamp,
-      )
-    ) {
-      throw new Error(
-        "Nieprawidłowa data akceptacji dokumentów.",
       );
     }
 

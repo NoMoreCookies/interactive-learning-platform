@@ -1,3 +1,4 @@
+import { getCurrentUser } from "aws-amplify/auth";
 import { generateClient } from "aws-amplify/data";
 
 import type { Schema } from "@/amplify/data/resource";
@@ -16,48 +17,63 @@ export type LegalUpdateRequirement =
   | "both";
 
 export async function getLegalUpdateRequirement(): Promise<LegalUpdateRequirement> {
-  const { data, errors } =
-    await client.models.LegalAcceptance.list();
+  const { userId } = await getCurrentUser();
 
-  if (errors?.length) {
-    console.error(
-      "Failed to load legal acceptances:",
+  let hasCurrentTerms = false;
+  let hasCurrentPrivacy = false;
+  let nextToken: string | null | undefined;
+
+  do {
+    const {
+      data,
       errors,
-    );
+      nextToken: newNextToken,
+    } = await client.models.LegalAcceptance.list({
+      filter: {
+        userId: {
+          eq: userId,
+        },
+      },
+      limit: 100,
+      nextToken,
+    });
 
-    throw new Error(
-      "Nie udało się sprawdzić zaakceptowanych dokumentów.",
-    );
-  }
+    if (errors?.length) {
+      console.error(
+        "Failed to load legal acceptances:",
+        errors,
+      );
 
-  if (!data.length) {
-    return "both";
-  }
+      throw new Error(
+        "Nie udało się sprawdzić zaakceptowanych dokumentów.",
+      );
+    }
 
-  const latestAcceptance = [...data].sort(
-    (first, second) =>
-      new Date(
-        second.acceptedAt,
-      ).getTime() -
-      new Date(
-        first.acceptedAt,
-      ).getTime(),
-  )[0];
+    hasCurrentTerms =
+      hasCurrentTerms ||
+      data.some(
+        (acceptance) =>
+          acceptance.termsVersion ===
+          CURRENT_TERMS_VERSION,
+      );
 
-  const hasCurrentTerms =
-    latestAcceptance.termsVersion ===
-    CURRENT_TERMS_VERSION;
+    hasCurrentPrivacy =
+      hasCurrentPrivacy ||
+      data.some(
+        (acceptance) =>
+          acceptance.privacyVersion ===
+          CURRENT_PRIVACY_VERSION,
+      );
 
-  const hasCurrentPrivacy =
-    latestAcceptance.privacyVersion ===
-    CURRENT_PRIVACY_VERSION;
+    if (
+      hasCurrentTerms &&
+      hasCurrentPrivacy
+    ) {
+      return "none";
+    }
 
-  if (
-    hasCurrentTerms &&
-    hasCurrentPrivacy
-  ) {
-    return "none";
-  }
+    nextToken = newNextToken;
+  } while (nextToken);
 
   if (
     !hasCurrentTerms &&
@@ -74,10 +90,18 @@ export async function getLegalUpdateRequirement(): Promise<LegalUpdateRequiremen
 }
 
 export async function acceptCurrentLegal(): Promise<void> {
-  const { errors } =
-    await client.mutations.acceptCurrentLegal();
+  const { data, errors } =
+    await client.mutations.acceptCurrentLegal({
+      termsVersion:
+        CURRENT_TERMS_VERSION,
+      privacyVersion:
+        CURRENT_PRIVACY_VERSION,
+    });
 
-  if (errors?.length) {
+  if (
+    errors?.length ||
+    data !== true
+  ) {
     console.error(
       "Failed to accept current legal documents:",
       errors,

@@ -12,6 +12,7 @@ import {
 } from "next/navigation";
 
 import { useAuth } from "@/components/auth/AuthProvider";
+
 import {
   getLegalUpdateRequirement,
 } from "@/lib/legal-acceptance";
@@ -35,6 +36,8 @@ export default function LegalAccessGuard({
   const {
     isAuthenticated,
     isLoading: isAuthLoading,
+    isCurrentLegalVerified,
+    markCurrentLegalVerified,
   } = useAuth();
 
   const [
@@ -53,6 +56,11 @@ export default function LegalAccessGuard({
     }
 
     if (isAllowedPath(pathname)) {
+      setIsCheckingLegal(false);
+      return;
+    }
+
+    if (isCurrentLegalVerified) {
       setIsCheckingLegal(false);
       return;
     }
@@ -78,6 +86,8 @@ export default function LegalAccessGuard({
           return;
         }
 
+        markCurrentLegalVerified();
+
         setIsCheckingLegal(false);
       } catch (error) {
         console.error(
@@ -101,6 +111,8 @@ export default function LegalAccessGuard({
   }, [
     isAuthenticated,
     isAuthLoading,
+    isCurrentLegalVerified,
+    markCurrentLegalVerified,
     pathname,
     router,
   ]);

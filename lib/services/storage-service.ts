@@ -11,15 +11,79 @@ export type UploadProgress = {
 };
 
 type UploadFileOptions = {
-  onProgress?: (progress: UploadProgress) => void;
+  maxSizeBytes?: number;
+
+  onProgress?: (
+    progress: UploadProgress,
+  ) => void;
 };
 
-function sanitizePathSegment(value: string): string {
+const COURSE_STORAGE_PREFIX =
+  "courses/";
+
+function sanitizePathSegment(
+  value: string,
+): string {
   return value
     .trim()
     .toLowerCase()
     .replace(/\s+/g, "-")
     .replace(/[^a-z0-9._-]/g, "");
+}
+
+function validatePathSegment(
+  value: string,
+): boolean {
+  return (
+    Boolean(value) &&
+    value !== "." &&
+    value !== ".."
+  );
+}
+
+function assertValidCourseStoragePath(
+  path: string,
+): string {
+  const normalizedPath =
+    path.trim();
+
+  if (
+    !normalizedPath ||
+    !normalizedPath.startsWith(
+      COURSE_STORAGE_PREFIX,
+    ) ||
+    normalizedPath.startsWith("/") ||
+    normalizedPath.includes("\\") ||
+    normalizedPath.includes("..")
+  ) {
+    throw new Error(
+      "Nieprawidłowa ścieżka pliku.",
+    );
+  }
+
+  const segments =
+    normalizedPath.split("/");
+
+  /*
+   * Expected structure:
+   *
+   * courses/{courseSlug}/{lessonSlug}/{fileName}
+   */
+  if (
+    segments.length !== 4 ||
+    segments.some(
+      (segment) =>
+        !validatePathSegment(
+          segment,
+        ),
+    )
+  ) {
+    throw new Error(
+      "Nieprawidłowa struktura ścieżki pliku.",
+    );
+  }
+
+  return normalizedPath;
 }
 
 export function buildLessonFilePath(
@@ -28,30 +92,46 @@ export function buildLessonFilePath(
   fileName: string,
 ): string {
   const safeCourseSlug =
-    sanitizePathSegment(courseSlug);
+    sanitizePathSegment(
+      courseSlug,
+    );
 
   const safeLessonSlug =
-    sanitizePathSegment(lessonSlug);
+    sanitizePathSegment(
+      lessonSlug,
+    );
 
   const safeFileName =
-    sanitizePathSegment(fileName);
+    sanitizePathSegment(
+      fileName,
+    );
 
   if (
-    !safeCourseSlug ||
-    !safeLessonSlug ||
-    !safeFileName
+    !validatePathSegment(
+      safeCourseSlug,
+    ) ||
+    !validatePathSegment(
+      safeLessonSlug,
+    ) ||
+    !validatePathSegment(
+      safeFileName,
+    )
   ) {
     throw new Error(
       "Nie udało się zbudować poprawnej ścieżki pliku.",
     );
   }
 
-  return [
+  const path = [
     "courses",
     safeCourseSlug,
     safeLessonSlug,
     safeFileName,
   ].join("/");
+
+  return assertValidCourseStoragePath(
+    path,
+  );
 }
 
 export function buildLessonVideoPath(
@@ -63,12 +143,18 @@ export function buildLessonVideoPath(
     originalFileName
       .split(".")
       .pop()
-      ?.toLowerCase() || "mp4";
+      ?.toLowerCase();
+
+  if (fileExtension !== "mp4") {
+    throw new Error(
+      "Film musi być plikiem MP4.",
+    );
+  }
 
   return buildLessonFilePath(
     courseSlug,
     lessonSlug,
-    `video.${fileExtension}`,
+    "video.mp4",
   );
 }
 
@@ -94,31 +180,54 @@ export async function uploadFile(
     );
   }
 
-  if (!path.trim()) {
+  if (file.size <= 0) {
     throw new Error(
-      "Ścieżka pliku nie może być pusta.",
+      "Plik jest pusty.",
     );
   }
 
+  if (
+    options?.maxSizeBytes != null &&
+    file.size >
+      options.maxSizeBytes
+  ) {
+    throw new Error(
+      "Plik przekracza dozwolony rozmiar.",
+    );
+  }
+
+  const validatedPath =
+    assertValidCourseStoragePath(
+      path,
+    );
+
   const result = await uploadData({
-    path,
+    path: validatedPath,
     data: file,
+
     options: {
       contentType:
-        file.type || "application/octet-stream",
+        file.type ||
+        "application/octet-stream",
 
+      /*
+       * A new upload must never silently replace an existing
+       * object.
+       */
       preventOverwrite: true,
 
       onProgress: ({
         transferredBytes,
         totalBytes,
       }) => {
-        const percentage = totalBytes
-          ? Math.round(
-              (transferredBytes / totalBytes) *
-                100,
-            )
-          : 0;
+        const percentage =
+          totalBytes
+            ? Math.round(
+                (transferredBytes /
+                  totalBytes) *
+                  100,
+              )
+            : 0;
 
         options?.onProgress?.({
           transferredBytes,
@@ -136,14 +245,26 @@ export async function getFileUrl(
   path: string,
   expiresIn = 900,
 ): Promise<string> {
-  if (!path.trim()) {
+  const validatedPath =
+    assertValidCourseStoragePath(
+      path,
+    );
+
+  if (
+    !Number.isInteger(
+      expiresIn,
+    ) ||
+    expiresIn < 60 ||
+    expiresIn > 3600
+  ) {
     throw new Error(
-      "Ścieżka pliku nie może być pusta.",
+      "Nieprawidłowy czas ważności URL.",
     );
   }
 
   const result = await getUrl({
-    path,
+    path: validatedPath,
+
     options: {
       validateObjectExistence: true,
       expiresIn,
@@ -156,13 +277,12 @@ export async function getFileUrl(
 export async function deleteFile(
   path: string,
 ): Promise<void> {
-  if (!path.trim()) {
-    throw new Error(
-      "Ścieżka pliku nie może być pusta.",
+  const validatedPath =
+    assertValidCourseStoragePath(
+      path,
     );
-  }
 
   await remove({
-    path,
+    path: validatedPath,
   });
 }

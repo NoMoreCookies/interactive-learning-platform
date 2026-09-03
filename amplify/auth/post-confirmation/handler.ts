@@ -9,9 +9,17 @@ import {
   getAmplifyDataClientConfig,
 } from "@aws-amplify/backend/function/runtime";
 
-import { env } from "$amplify/env/post-confirmation";
+import {
+  env,
+} from "$amplify/env/post-confirmation";
 
-import type { Schema } from "../../data/resource";
+import {
+  buildLegalAcceptanceId,
+} from "../../../lib/legal-acceptance-id";
+
+import type {
+  Schema,
+} from "../../data/resource";
 
 const {
   resourceConfig,
@@ -28,6 +36,13 @@ const client =
 
 export const handler: PostConfirmationTriggerHandler =
   async (event) => {
+    if (
+      event.triggerSource !==
+      "PostConfirmation_ConfirmSignUp"
+    ) {
+      return event;
+    }
+
     const attributes =
       event.request.userAttributes;
 
@@ -44,31 +59,51 @@ export const handler: PostConfirmationTriggerHandler =
         "custom:privacy_version"
       ];
 
-    const legalAcceptedAt =
-      attributes[
-        "custom:legal_accepted_at"
-      ];
-
     if (
       !userId ||
       !termsVersion ||
-      !privacyVersion ||
-      !legalAcceptedAt
+      !privacyVersion
     ) {
+      console.error(
+        "Missing required legal acceptance attributes.",
+        {
+          triggerSource:
+            event.triggerSource,
+          hasUserId:
+            Boolean(userId),
+          hasTermsVersion:
+            Boolean(termsVersion),
+          hasPrivacyVersion:
+            Boolean(privacyVersion),
+        },
+      );
+
       throw new Error(
         "Brak wymaganych danych dotyczących akceptacji dokumentów.",
       );
     }
 
-    const { errors } =
-      await client.models.LegalAcceptance.create({
+    const owner =
+      `${userId}::${event.userName}`;
+
+    const acceptanceId =
+      buildLegalAcceptanceId(
         userId,
-        owner:
-          `${userId}::${event.userName}`,
         termsVersion,
         privacyVersion,
-        acceptedAt:
-          legalAcceptedAt,
+      );
+
+    const acceptedAt =
+      new Date().toISOString();
+
+    const { errors } =
+      await client.models.LegalAcceptance.create({
+        id: acceptanceId,
+        userId,
+        owner,
+        termsVersion,
+        privacyVersion,
+        acceptedAt,
       });
 
     if (errors?.length) {

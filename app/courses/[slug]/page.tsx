@@ -1,10 +1,17 @@
 "use client";
 
 import Image from "next/image";
-import { use, useEffect, useState } from "react";
+import {
+  use,
+  useEffect,
+  useState,
+} from "react";
 
 import CourseModuleAccordion from "@/components/courses/CourseModuleAccordion";
-import { getCourseStructure } from "@/lib/services/course-service";
+
+import {
+  getPublishedCourseOutline,
+} from "@/lib/services/course-service";
 
 type CoursePageProps = {
   params: Promise<{
@@ -12,9 +19,14 @@ type CoursePageProps = {
   }>;
 };
 
-type CourseStructure = NonNullable<
-  Awaited<ReturnType<typeof getCourseStructure>>
->;
+type CourseStructure =
+  NonNullable<
+    Awaited<
+      ReturnType<
+        typeof getPublishedCourseOutline
+      >
+    >
+  >;
 
 type CourseIllustrations = {
   left: string;
@@ -27,26 +39,34 @@ function getCourseIllustrations(
   switch (subject) {
     case "MATHEMATICS":
       return {
-        left: "/courses/mathematics-left.png",
-        right: "/courses/mathematics-right.png",
+        left:
+          "/courses/mathematics-left.png",
+        right:
+          "/courses/mathematics-right.png",
       };
 
     case "PHYSICS":
       return {
-        left: "/courses/physics-left.png",
-        right: "/courses/physics-right.png",
+        left:
+          "/courses/physics-left.png",
+        right:
+          "/courses/physics-right.png",
       };
 
     case "COMPUTER_SCIENCE":
       return {
-        left: "/courses/computer-science-left.png",
-        right: "/courses/computer-science-right.png",
+        left:
+          "/courses/computer-science-left.png",
+        right:
+          "/courses/computer-science-right.png",
       };
 
     default:
       return {
-        left: "/categories/mathematics-3d.png",
-        right: "/categories/mathematics-3d.png",
+        left:
+          "/categories/mathematics-3d.png",
+        right:
+          "/categories/mathematics-3d.png",
       };
   }
 }
@@ -57,10 +77,17 @@ export default function CoursePage({
   const { slug } = use(params);
 
   const [course, setCourse] =
-    useState<CourseStructure | null>(null);
+    useState<CourseStructure | null>(
+      null,
+    );
 
-  const [isLoading, setIsLoading] = useState(true);
-  const [errorMessage, setErrorMessage] = useState("");
+  const [isLoading, setIsLoading] =
+    useState(true);
+
+  const [
+    errorMessage,
+    setErrorMessage,
+  ] = useState("");
 
   useEffect(() => {
     async function loadCourse() {
@@ -68,23 +95,29 @@ export default function CoursePage({
       setErrorMessage("");
 
       try {
-        console.log("Pobieram strukturę kursu:", slug);
-
-        const result = await getCourseStructure(slug);
-
-        console.log("Struktura kursu z AWS:", result);
+        const result =
+          await getPublishedCourseOutline(
+            slug,
+          );
 
         if (!result) {
-          setErrorMessage("Nie znaleziono takiego kursu.");
+          setCourse(null);
+
+          setErrorMessage(
+            "Nie znaleziono takiego kursu.",
+          );
+
           return;
         }
 
         setCourse(result);
       } catch (error) {
         console.error(
-          "Błąd pobierania struktury kursu:",
+          "Nie udało się pobrać publicznej struktury kursu:",
           error,
         );
+
+        setCourse(null);
 
         setErrorMessage(
           "Nie udało się pobrać kursu.",
@@ -123,7 +156,9 @@ export default function CoursePage({
   }
 
   const illustrations =
-    getCourseIllustrations(course.subject);
+    getCourseIllustrations(
+      course.subject,
+    );
 
   return (
     <main className="min-h-screen">
@@ -169,17 +204,31 @@ export default function CoursePage({
         {course.modules.length > 0 ? (
           <div className="space-y-4">
             {course.modules.map(
-              (courseModule, moduleIndex) => (
+              (
+                courseModule,
+                moduleIndex,
+              ) => (
                 <CourseModuleAccordion
                   key={courseModule.id}
-                  courseSlug={course.slug}
-                  moduleNumber={courseModule.order}
-                  title={courseModule.title}
-                  description={
-                    courseModule.description ?? ""
+                  courseSlug={
+                    course.slug
                   }
-                  lessons={courseModule.lessons}
-                  defaultOpen={moduleIndex === 0}
+                  moduleNumber={
+                    courseModule.order
+                  }
+                  title={
+                    courseModule.title
+                  }
+                  description={
+                    courseModule.description ??
+                    ""
+                  }
+                  lessons={
+                    courseModule.lessons
+                  }
+                  defaultOpen={
+                    moduleIndex === 0
+                  }
                 />
               ),
             )}
@@ -187,7 +236,8 @@ export default function CoursePage({
         ) : (
           <div className="rounded-2xl border border-zinc-800 bg-zinc-950/30 p-10 text-center">
             <p className="text-zinc-400">
-              Ten kurs nie zawiera jeszcze modułów.
+              Ten kurs nie zawiera
+              jeszcze modułów.
             </p>
           </div>
         )}

@@ -17,17 +17,34 @@ import {
   type AuthUser,
 } from "aws-amplify/auth";
 
+import {
+  CURRENT_PRIVACY_VERSION,
+  CURRENT_TERMS_VERSION,
+} from "@/lib/legal";
+
+type LegalVerification = {
+  userId: string;
+  termsVersion: string;
+  privacyVersion: string;
+};
+
 type AuthContextValue = {
   user: AuthUser | null;
   isAuthenticated: boolean;
   isAdmin: boolean;
   isLoading: boolean;
+
+  isCurrentLegalVerified: boolean;
+
   refreshAuth: () => Promise<void>;
   logout: () => Promise<void>;
+  markCurrentLegalVerified: () => void;
 };
 
 const AuthContext =
-  createContext<AuthContextValue | null>(null);
+  createContext<AuthContextValue | null>(
+    null,
+  );
 
 function readGroups(
   value: unknown,
@@ -56,6 +73,14 @@ export default function AuthProvider({
   const [isLoading, setIsLoading] =
     useState(true);
 
+  const [
+    legalVerification,
+    setLegalVerification,
+  ] =
+    useState<LegalVerification | null>(
+      null,
+    );
+
   const refreshAuth =
     useCallback(async () => {
       setIsLoading(true);
@@ -76,12 +101,22 @@ export default function AuthProvider({
         );
 
         setUser(currentUser);
+
         setIsAdmin(
           groups.includes("ADMIN"),
+        );
+
+        setLegalVerification(
+          (current) =>
+            current?.userId ===
+            currentUser.userId
+              ? current
+              : null,
         );
       } catch {
         setUser(null);
         setIsAdmin(false);
+        setLegalVerification(null);
       } finally {
         setIsLoading(false);
       }
@@ -91,12 +126,41 @@ export default function AuthProvider({
     void refreshAuth();
   }, [refreshAuth]);
 
-  async function logout() {
-    await signOut();
+  const logout =
+    useCallback(async () => {
+      await signOut();
 
-    setUser(null);
-    setIsAdmin(false);
-  }
+      setUser(null);
+      setIsAdmin(false);
+      setLegalVerification(null);
+    }, []);
+
+  const markCurrentLegalVerified =
+    useCallback(() => {
+      if (!user) {
+        return;
+      }
+
+      setLegalVerification({
+        userId: user.userId,
+        termsVersion:
+          CURRENT_TERMS_VERSION,
+        privacyVersion:
+          CURRENT_PRIVACY_VERSION,
+      });
+    }, [user]);
+
+  const isCurrentLegalVerified =
+    Boolean(
+      user &&
+        legalVerification &&
+        legalVerification.userId ===
+          user.userId &&
+        legalVerification.termsVersion ===
+          CURRENT_TERMS_VERSION &&
+        legalVerification.privacyVersion ===
+          CURRENT_PRIVACY_VERSION,
+    );
 
   const value = useMemo(
     () => ({
@@ -104,14 +168,19 @@ export default function AuthProvider({
       isAuthenticated: user !== null,
       isAdmin,
       isLoading,
+      isCurrentLegalVerified,
       refreshAuth,
       logout,
+      markCurrentLegalVerified,
     }),
     [
       user,
       isAdmin,
       isLoading,
+      isCurrentLegalVerified,
       refreshAuth,
+      logout,
+      markCurrentLegalVerified,
     ],
   );
 
@@ -123,7 +192,8 @@ export default function AuthProvider({
 }
 
 export function useAuth(): AuthContextValue {
-  const context = useContext(AuthContext);
+  const context =
+    useContext(AuthContext);
 
   if (!context) {
     throw new Error(

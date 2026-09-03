@@ -1,11 +1,18 @@
 import Link from "next/link";
 
-import type { Schema } from "@/amplify/data/resource";
+import type {
+  getPublishedCourses,
+} from "@/lib/services/course-service";
 
-type Course = Schema["Course"]["type"];
+type PublishedCourse =
+  Awaited<
+    ReturnType<
+      typeof getPublishedCourses
+    >
+  >[number];
 
 type CourseCardProps = {
-  course: Course;
+  course: PublishedCourse;
 };
 
 export default function CourseCard({

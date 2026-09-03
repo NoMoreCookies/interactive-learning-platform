@@ -1,35 +1,22 @@
-import { Amplify } from "aws-amplify";
-import { generateClient } from "aws-amplify/data";
-
 import {
-  getAmplifyDataClientConfig,
-} from "@aws-amplify/backend/function/runtime";
-
-import {
-  env,
-} from "$amplify/env/accept-current-legal";
+  ConditionalCheckFailedException,
+  DynamoDBClient,
+  PutItemCommand,
+} from "@aws-sdk/client-dynamodb";
 
 import {
   CURRENT_PRIVACY_VERSION,
   CURRENT_TERMS_VERSION,
-} from "../../../lib/legal";
+} from "../../shared/legal-versions";
+
+import {
+  buildLegalAcceptanceId,
+} from "../../../lib/legal-acceptance-id";
 
 import type { Schema } from "../resource";
 
-const {
-  resourceConfig,
-  libraryOptions,
-} = await getAmplifyDataClientConfig(
-  env,
-);
-
-Amplify.configure(
-  resourceConfig,
-  libraryOptions,
-);
-
-const client =
-  generateClient<Schema>();
+const dynamoDb =
+  new DynamoDBClient({});
 
 export const handler: Schema["acceptCurrentLegal"]["functionHandler"] =
   async (event) => {
@@ -47,29 +34,43 @@ export const handler: Schema["acceptCurrentLegal"]["functionHandler"] =
       );
     }
 
-    const userId = identity.sub;
+    const {
+      termsVersion:
+        requestedTermsVersion,
+      privacyVersion:
+        requestedPrivacyVersion,
+    } = event.arguments;
 
-    const owner =
-      `${identity.sub}::${identity.username}`;
-
-    const acceptedAt =
-      new Date().toISOString();
-
-    const { errors } =
-      await client.models.LegalAcceptance.create({
-        userId,
-        owner,
-        termsVersion:
-          CURRENT_TERMS_VERSION,
-        privacyVersion:
-          CURRENT_PRIVACY_VERSION,
-        acceptedAt,
-      });
-
-    if (errors?.length) {
+    if (
+      requestedTermsVersion !==
+        CURRENT_TERMS_VERSION ||
+      requestedPrivacyVersion !==
+        CURRENT_PRIVACY_VERSION
+    ) {
       console.error(
-        "Failed to create legal acceptance:",
-        errors,
+        "Legal version mismatch.",
+        {
+          requestedTermsVersion,
+          requestedPrivacyVersion,
+          currentTermsVersion:
+            CURRENT_TERMS_VERSION,
+          currentPrivacyVersion:
+            CURRENT_PRIVACY_VERSION,
+        },
+      );
+
+      throw new Error(
+        "Wersja dokumentów uległa zmianie. Odśwież stronę i spróbuj ponownie.",
+      );
+    }
+
+    const tableName =
+      process.env
+        .LEGAL_ACCEPTANCE_TABLE_NAME;
+
+    if (!tableName) {
+      console.error(
+        "Legal acceptance table name is not configured.",
       );
 
       throw new Error(
@@ -77,5 +78,105 @@ export const handler: Schema["acceptCurrentLegal"]["functionHandler"] =
       );
     }
 
-    return acceptedAt;
+    const userId =
+      identity.sub;
+
+    const owner =
+      `${identity.sub}::${identity.username}`;
+
+    /*
+     * We intentionally use server-side versions
+     * after validating the client's expected versions.
+     */
+    const termsVersion =
+      CURRENT_TERMS_VERSION;
+
+    const privacyVersion =
+      CURRENT_PRIVACY_VERSION;
+
+    const acceptanceId =
+      buildLegalAcceptanceId(
+        userId,
+        termsVersion,
+        privacyVersion,
+      );
+
+    const timestamp =
+      new Date().toISOString();
+
+    try {
+      await dynamoDb.send(
+        new PutItemCommand({
+          TableName: tableName,
+
+          Item: {
+            id: {
+              S: acceptanceId,
+            },
+
+            userId: {
+              S: userId,
+            },
+
+            owner: {
+              S: owner,
+            },
+
+            termsVersion: {
+              S: termsVersion,
+            },
+
+            privacyVersion: {
+              S: privacyVersion,
+            },
+
+            acceptedAt: {
+              S: timestamp,
+            },
+
+            createdAt: {
+              S: timestamp,
+            },
+
+            updatedAt: {
+              S: timestamp,
+            },
+
+            __typename: {
+              S: "LegalAcceptance",
+            },
+          },
+
+          ConditionExpression:
+            "attribute_not_exists(#id)",
+
+          ExpressionAttributeNames: {
+            "#id": "id",
+          },
+        }),
+      );
+
+      return true;
+    } catch (error) {
+      if (
+        error instanceof
+        ConditionalCheckFailedException
+      ) {
+        return true;
+      }
+
+      console.error(
+        "Failed to create legal acceptance.",
+        {
+          errorName:
+            error instanceof Error
+              ? error.name
+              : "UnknownError",
+        },
+      );
+
+      throw new Error(
+        "Nie udało się zapisać akceptacji dokumentów.",
+      );
+    }
   };

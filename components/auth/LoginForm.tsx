@@ -14,6 +14,7 @@ import { useRouter } from "next/navigation";
 
 import { useAuth } from "@/components/auth/AuthProvider";
 import LegalUpdateModal from "@/components/auth/LegalUpdateModal";
+
 import {
   Button,
   FormField,
@@ -54,6 +55,7 @@ export default function LoginForm({
   const {
     refreshAuth,
     logout,
+    markCurrentLegalVerified,
   } = useAuth();
 
   const [email, setEmail] =
@@ -195,6 +197,8 @@ export default function LoginForm({
         return;
       }
 
+      markCurrentLegalVerified();
+
       navigateAfterLogin(
         destination,
       );
@@ -237,17 +241,7 @@ export default function LoginForm({
     try {
       await acceptCurrentLegal();
 
-      const requirementAfterAcceptance =
-        await getLegalUpdateRequirement();
-
-      if (
-        requirementAfterAcceptance !==
-        "none"
-      ) {
-        throw new Error(
-          "Akceptacja nie została prawidłowo zapisana.",
-        );
-      }
+      markCurrentLegalVerified();
 
       const destination =
         destinationAfterLogin;
@@ -282,6 +276,15 @@ export default function LoginForm({
       setPassword("");
 
       router.refresh();
+    } catch (caughtError) {
+      console.error(
+        "Failed to log out:",
+        caughtError,
+      );
+
+      setLegalError(
+        "Nie udało się wylogować. Spróbuj ponownie.",
+      );
     } finally {
       setIsAcceptingLegal(false);
     }

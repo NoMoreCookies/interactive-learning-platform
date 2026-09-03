@@ -1,3 +1,4 @@
-export const CURRENT_TERMS_VERSION = "1.0";
-
-export const CURRENT_PRIVACY_VERSION = "1.0";
+export {
+  CURRENT_PRIVACY_VERSION,
+  CURRENT_TERMS_VERSION,
+} from "@/amplify/shared/legal-versions";

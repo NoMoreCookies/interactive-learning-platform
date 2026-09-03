@@ -70,17 +70,9 @@ function throwDataError(
 }
 
 export async function getPublishedCourses() {
-  const authMode =
-    await getCourseReadAuthMode();
-
   const { data, errors } =
-    await amplifyClient.models.Course.list({
-      authMode,
-      filter: {
-        published: {
-          eq: true,
-        },
-      },
+    await amplifyClient.queries.listPublishedCourses({
+      authMode: "apiKey",
     });
 
   if (errors?.length) {
@@ -90,7 +82,14 @@ export async function getPublishedCourses() {
     );
   }
 
-  return sortByOrder(data);
+  const courses =
+    (data ?? []).filter(
+      (course) =>
+        course !== null &&
+        course !== undefined,
+    );
+
+  return sortByOrder(courses);
 }
 
 export async function getCourseBySlug(
@@ -199,6 +198,83 @@ export async function getLessonsByModuleId(
 
   return sortByOrder(data);
 }
+
+function isPresent<T>(
+  value: T | null | undefined,
+): value is T {
+  return value !== null && value !== undefined;
+}
+
+export async function getPublishedCourseOutline(
+  slug: string,
+) {
+  const normalizedSlug = slug.trim();
+
+  if (!normalizedSlug) {
+    return null;
+  }
+
+  const { data, errors } =
+    await amplifyClient.queries.getPublishedCourseOutline(
+      {
+        slug: normalizedSlug,
+      },
+      {
+        authMode: "apiKey",
+      },
+    );
+
+  if (errors?.length) {
+    throwDataError(
+      "Pobieranie struktury kursu",
+      errors,
+    );
+  }
+
+  if (!data) {
+    return null;
+  }
+
+  /*
+   * Amplify's generated custom-type response can model nested
+   * array elements as nullable. The backend does not intentionally
+   * return null elements, but we normalize the API boundary here
+   * so the rest of the frontend receives clean arrays.
+   */
+  return {
+    ...data,
+
+    modules: (data.modules ?? [])
+      .filter(isPresent)
+      .map((courseModule) => ({
+        ...courseModule,
+
+        lessons: (
+          courseModule.lessons ?? []
+        ).filter(isPresent),
+      })),
+  };
+}
+
+
+export type PublishedCourseOutline =
+  NonNullable<
+    Awaited<
+      ReturnType<
+        typeof getPublishedCourseOutline
+      >
+    >
+  >;
+
+export type PublishedCourseModule =
+  PublishedCourseOutline[
+    "modules"
+  ][number];
+
+export type PublishedLesson =
+  PublishedCourseModule[
+    "lessons"
+  ][number];
 
 export async function getCourseStructure(
   slug: string,

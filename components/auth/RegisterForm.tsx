@@ -130,9 +130,6 @@ export default function RegisterForm({
       const normalizedEmail =
         email.trim().toLowerCase();
 
-      const legalAcceptedAt =
-        new Date().toISOString();
-
       const result = await signUp({
         username: normalizedEmail,
         password,
@@ -145,9 +142,6 @@ export default function RegisterForm({
 
             "custom:privacy_version":
               CURRENT_PRIVACY_VERSION,
-
-            "custom:legal_accepted_at":
-              legalAcceptedAt,
           },
         },
       });

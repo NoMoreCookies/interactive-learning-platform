@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-
+import Image from "next/image";
 import { useAuth } from "@/components/auth/AuthProvider";
 
 export default function Navbar() {
@@ -17,6 +17,15 @@ export default function Navbar() {
           href="/"
           className="flex items-center gap-3 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
+          <Image
+            src="/book-icon.png"
+            alt=""
+            width={32}
+            height={32}
+            className="h-8 w-8 object-contain"
+            priority
+          />
+
           <span className="text-lg font-bold text-zinc-100">
             Witaj
           </span>

@@ -7,7 +7,6 @@ import {
   useState,
 } from "react";
 
-import type { Schema } from "@/amplify/data/resource";
 
 import CategoryBackground from "@/components/courses/CategoryBackground";
 import CourseCard from "@/components/courses/CourseCard";
@@ -22,7 +21,12 @@ type SubjectOption = {
   icon: string;
 };
 
-type Course = Schema["Course"]["type"];
+type PublishedCourse =
+  Awaited<
+    ReturnType<
+      typeof getPublishedCourses
+    >
+  >[number];
 
 const subjectOptions: SubjectOption[] = [
   {
@@ -118,7 +122,7 @@ export default function CoursesPage() {
     useState<Subject>("MATHEMATICS");
 
   const [courses, setCourses] =
-    useState<Course[]>([]);
+    useState<PublishedCourse[]>([]);
 
   const [isLoading, setIsLoading] =
     useState(true);

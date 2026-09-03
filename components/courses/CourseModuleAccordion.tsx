@@ -3,16 +3,31 @@
 import Link from "next/link";
 import { useState } from "react";
 
-import type { Schema } from "@/amplify/data/resource";
+import type {
+  getPublishedCourseOutline,
+} from "@/lib/services/course-service";
 
-type Lesson = Schema["Lesson"]["type"];
+type CourseOutline =
+  NonNullable<
+    Awaited<
+      ReturnType<
+        typeof getPublishedCourseOutline
+      >
+    >
+  >;
+
+type CourseModule =
+  CourseOutline["modules"][number];
+
+type PublicLesson =
+  CourseModule["lessons"][number];
 
 type CourseModuleAccordionProps = {
   courseSlug: string;
   moduleNumber: number;
   title: string;
   description?: string | null;
-  lessons: Lesson[];
+  lessons: PublicLesson[];
   defaultOpen?: boolean;
 };
 
@@ -24,19 +39,27 @@ export default function CourseModuleAccordion({
   lessons,
   defaultOpen = false,
 }: CourseModuleAccordionProps) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
+  const [isOpen, setIsOpen] =
+    useState(defaultOpen);
 
   return (
     <section className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/30">
       <button
         type="button"
-        onClick={() => setIsOpen((previous) => !previous)}
+        onClick={() =>
+          setIsOpen(
+            (previous) => !previous,
+          )
+        }
         aria-expanded={isOpen}
         className="flex w-full cursor-pointer items-center justify-between gap-6 p-6 text-left transition hover:bg-zinc-900/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-zinc-500"
       >
         <div className="flex items-start gap-5">
           <span className="pt-1 text-sm font-medium text-zinc-500">
-            {String(moduleNumber).padStart(2, "0")}
+            {String(moduleNumber).padStart(
+              2,
+              "0",
+            )}
           </span>
 
           <div>
@@ -55,14 +78,18 @@ export default function CourseModuleAccordion({
         <div className="flex shrink-0 items-center gap-4">
           <span className="hidden text-sm text-zinc-500 sm:block">
             {lessons.length}{" "}
-            {lessons.length === 1 ? "lekcja" : "lekcje"}
+            {lessons.length === 1
+              ? "lekcja"
+              : "lekcje"}
           </span>
 
           <svg
             aria-hidden="true"
             viewBox="0 0 24 24"
             className={`h-5 w-5 text-zinc-400 transition-transform duration-500 ${
-              isOpen ? "rotate-180" : ""
+              isOpen
+                ? "rotate-180"
+                : ""
             }`}
             fill="none"
             stroke="currentColor"
@@ -79,13 +106,17 @@ export default function CourseModuleAccordion({
 
       <div
         className={`grid transition-[grid-template-rows] duration-500 ease-in-out ${
-          isOpen ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+          isOpen
+            ? "grid-rows-[1fr]"
+            : "grid-rows-[0fr]"
         }`}
       >
         <div className="overflow-hidden">
           <div
             className={`space-y-3 border-t border-zinc-800 p-4 transition-opacity duration-500 sm:p-6 ${
-              isOpen ? "opacity-100" : "opacity-0"
+              isOpen
+                ? "opacity-100"
+                : "opacity-0"
             }`}
           >
             {lessons.map((lesson) => (

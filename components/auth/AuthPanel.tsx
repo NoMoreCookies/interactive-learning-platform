@@ -50,6 +50,7 @@ export default function AuthPanel() {
     isAdmin,
     isLoading: isAuthLoading,
     logout,
+    markCurrentLegalVerified,
   } = useAuth();
 
   const [mode, setMode] =
@@ -121,6 +122,8 @@ export default function AuthPanel() {
         }
 
         if (requirement === "none") {
+          markCurrentLegalVerified();
+
           router.replace(
             isAdmin
               ? "/admin"
@@ -162,6 +165,7 @@ export default function AuthPanel() {
     isAdmin,
     isAuthLoading,
     logout,
+    markCurrentLegalVerified,
     router,
   ]);
 
@@ -224,23 +228,13 @@ export default function AuthPanel() {
     try {
       await acceptCurrentLegal();
 
-      const requirementAfterAcceptance =
-        await getLegalUpdateRequirement();
-
-      if (
-        requirementAfterAcceptance !==
-        "none"
-      ) {
-        setLegalRequirement(
-          requirementAfterAcceptance,
-        );
-
-        setLegalError(
-          "Nie udało się potwierdzić aktualnej wersji dokumentów. Spróbuj ponownie.",
-        );
-
-        return;
-      }
+      /*
+       * The backend has confirmed the write.
+       * Cache that fact for the current React session
+       * so LegalAccessGuard does not immediately perform
+       * an eventually-consistent read after the write.
+       */
+      markCurrentLegalVerified();
 
       setLegalRequirement(null);
 
@@ -276,6 +270,15 @@ export default function AuthPanel() {
 
       router.replace("/auth");
       router.refresh();
+    } catch (error) {
+      console.error(
+        "Failed to log out:",
+        error,
+      );
+
+      setLegalError(
+        "Nie udało się wylogować. Spróbuj ponownie.",
+      );
     } finally {
       setIsAcceptingLegal(false);
     }
