@@ -1,16 +1,27 @@
-import { defineAuth } from "@aws-amplify/backend";
+import {
+  defineAuth,
+} from "@aws-amplify/backend";
 
-import { postConfirmation } from "./post-confirmation/resource";
-import { preSignUp } from "./pre-sign-up/resource";
+import {
+  postConfirmation,
+} from "./post-confirmation/resource";
 
-export const auth = defineAuth({
-  loginWith: {
-    email: {
-      verificationEmailStyle: "CODE",
-      verificationEmailSubject:
-        "Potwierdź konto w poprostumatma.pl",
+import {
+  preSignUp,
+} from "./pre-sign-up/resource";
 
-      verificationEmailBody: (createCode) => `
+export const auth =
+  defineAuth({
+    loginWith: {
+      email: {
+        verificationEmailStyle:
+          "CODE",
+
+        verificationEmailSubject:
+          "Potwierdź konto w poprostumatma.pl",
+
+        verificationEmailBody:
+          (createCode) => `
         <!doctype html>
         <html lang="pl">
           <body
@@ -119,44 +130,59 @@ export const auth = defineAuth({
           </body>
         </html>
       `,
-    },
-  },
-
-  userAttributes: {
-    "custom:terms_version": {
-      dataType: "String",
-      mutable: false,
-      minLen: 1,
-      maxLen: 16,
+      },
     },
 
-    "custom:privacy_version": {
-      dataType: "String",
-      mutable: false,
-      minLen: 1,
-      maxLen: 16,
+    /*
+     * MFA remains optional for normal platform users.
+     *
+     * ADMIN access is additionally guarded by the frontend so that
+     * an administrator must configure TOTP before using /admin.
+     */
+    multifactor: {
+      mode: "OPTIONAL",
+      totp: true,
     },
 
-    "custom:legal_accepted_at": {
-      dataType: "String",
-      mutable: false,
-      minLen: 20,
-      maxLen: 40,
+    userAttributes: {
+      "custom:terms_version": {
+        dataType: "String",
+        mutable: false,
+        minLen: 1,
+        maxLen: 16,
+      },
+
+      "custom:privacy_version": {
+        dataType: "String",
+        mutable: false,
+        minLen: 1,
+        maxLen: 16,
+      },
+
+      "custom:legal_accepted_at": {
+        dataType: "String",
+        mutable: false,
+        minLen: 20,
+        maxLen: 40,
+      },
     },
-  },
 
-  triggers: {
-    preSignUp,
-    postConfirmation,
-  },
-
-  senders: {
-    email: {
-      fromEmail:
-        "noreply@poprostumatma.pl",
-      fromName: "Po prostu matma",
+    triggers: {
+      preSignUp,
+      postConfirmation,
     },
-  },
 
-  groups: ["ADMIN"],
-});
+    senders: {
+      email: {
+        fromEmail:
+          "noreply@poprostumatma.pl",
+
+        fromName:
+          "Po prostu matma",
+      },
+    },
+
+    groups: [
+      "ADMIN",
+    ],
+  });

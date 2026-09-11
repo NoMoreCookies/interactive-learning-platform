@@ -6,14 +6,22 @@ import {
 } from "react";
 
 import {
+  confirmSignIn,
   fetchAuthSession,
   signIn,
 } from "aws-amplify/auth";
 
-import { useRouter } from "next/navigation";
+import {
+  useRouter,
+} from "next/navigation";
 
-import { useAuth } from "@/components/auth/AuthProvider";
+import {
+  useAuth,
+} from "@/components/auth/AuthProvider";
+
 import LegalUpdateModal from "@/components/auth/LegalUpdateModal";
+
+import VerificationCodeInput from "@/components/auth/VerificationCodeInput";
 
 import {
   Button,
@@ -30,19 +38,26 @@ import {
 
 type LoginFormProps = {
   defaultEmail?: string;
-  onRegisterClick: () => void;
-  onConfirmRequired: (
-    email: string,
-  ) => void;
-  onForgotPasswordClick: (
-    email: string,
-  ) => void;
+
+  onRegisterClick:
+    () => void;
+
+  onConfirmRequired:
+    (
+      email: string,
+    ) => void;
+
+  onForgotPasswordClick:
+    (
+      email: string,
+    ) => void;
 };
 
-type RequiredLegalUpdate = Exclude<
-  LegalUpdateRequirement,
-  "none"
->;
+type RequiredLegalUpdate =
+  Exclude<
+    LegalUpdateRequirement,
+    "none"
+  >;
 
 export default function LoginForm({
   defaultEmail = "",
@@ -50,76 +65,194 @@ export default function LoginForm({
   onConfirmRequired,
   onForgotPasswordClick,
 }: LoginFormProps) {
-  const router = useRouter();
+  const router =
+    useRouter();
 
   const {
     refreshAuth,
     logout,
     markCurrentLegalVerified,
-  } = useAuth();
+  } =
+    useAuth();
 
-  const [email, setEmail] =
-    useState(defaultEmail);
+  const [
+    email,
+    setEmail,
+  ] =
+    useState(
+      defaultEmail,
+    );
 
-  const [password, setPassword] =
+  const [
+    password,
+    setPassword,
+  ] =
     useState("");
 
   const [
     showPassword,
     setShowPassword,
-  ] = useState(false);
+  ] =
+    useState(false);
 
-  const [error, setError] =
+  const [
+    totpCode,
+    setTotpCode,
+  ] =
     useState("");
 
-  const [isLoading, setIsLoading] =
+  const [
+    requiresTotp,
+    setRequiresTotp,
+  ] =
+    useState(false);
+
+  const [
+    error,
+    setError,
+  ] =
+    useState("");
+
+  const [
+    isLoading,
+    setIsLoading,
+  ] =
     useState(false);
 
   const [
     legalRequirement,
     setLegalRequirement,
   ] =
-    useState<RequiredLegalUpdate | null>(
-      null,
-    );
+    useState<
+      RequiredLegalUpdate | null
+    >(null);
 
   const [
     destinationAfterLogin,
     setDestinationAfterLogin,
-  ] = useState<
-    "/account" | "/admin" | null
-  >(null);
+  ] =
+    useState<
+      "/account" |
+      "/admin" |
+      null
+    >(null);
 
   const [
     isAcceptingLegal,
     setIsAcceptingLegal,
-  ] = useState(false);
+  ] =
+    useState(false);
 
   const [
     legalError,
     setLegalError,
-  ] = useState("");
+  ] =
+    useState("");
+
+  async function completeSignedInFlow() {
+    await refreshAuth();
+
+    const session =
+      await fetchAuthSession();
+
+    const rawGroups =
+      session
+        .tokens
+        ?.accessToken
+        .payload[
+          "cognito:groups"
+        ];
+
+    const groups =
+      Array.isArray(
+        rawGroups,
+      )
+        ? rawGroups.filter(
+            (
+              group,
+            ): group is string =>
+              typeof group ===
+              "string",
+          )
+        : [];
+
+    const destination:
+      | "/admin"
+      | "/account" =
+      groups.includes(
+        "ADMIN",
+      )
+        ? "/admin"
+        : "/account";
+
+    let requirement:
+      LegalUpdateRequirement;
+
+    try {
+      requirement =
+        await getLegalUpdateRequirement();
+    } catch {
+      await logout();
+
+      setError(
+        "Nie udało się sprawdzić aktualności dokumentów. Spróbuj zalogować się ponownie.",
+      );
+
+      return;
+    }
+
+    if (
+      requirement !==
+      "none"
+    ) {
+      setPassword("");
+      setTotpCode("");
+
+      setDestinationAfterLogin(
+        destination,
+      );
+
+      setLegalRequirement(
+        requirement,
+      );
+
+      return;
+    }
+
+    markCurrentLegalVerified();
+
+    navigateAfterLogin(
+      destination,
+    );
+  }
 
   async function handleSubmit(
-    event: FormEvent<HTMLFormElement>,
+    event:
+      FormEvent<HTMLFormElement>,
   ) {
     event.preventDefault();
 
     const normalizedEmail =
-      normalizeEmail(email);
+      normalizeEmail(
+        email,
+      );
 
     setError("");
     setLegalError("");
     setIsLoading(true);
 
     try {
-      const result = await signIn({
-        username: normalizedEmail,
-        password,
-      });
+      const result =
+        await signIn({
+          username:
+            normalizedEmail,
+
+          password,
+        });
 
       if (
-        result.nextStep.signInStep ===
+        result.nextStep
+          .signInStep ===
         "CONFIRM_SIGN_UP"
       ) {
         setPassword("");
@@ -131,78 +264,39 @@ export default function LoginForm({
         return;
       }
 
-      if (!result.isSignedIn) {
-        setError(
-          "Logowanie wymaga wykonania dodatkowego kroku.",
-        );
-
-        return;
-      }
-
-      await refreshAuth();
-
-      const session =
-        await fetchAuthSession();
-
-      const rawGroups =
-        session.tokens?.accessToken.payload[
-          "cognito:groups"
-        ];
-
-      const groups = Array.isArray(
-        rawGroups,
-      )
-        ? rawGroups.filter(
-            (
-              group,
-            ): group is string =>
-              typeof group === "string",
-          )
-        : [];
-
-      const destination:
-        | "/admin"
-        | "/account" =
-        groups.includes("ADMIN")
-          ? "/admin"
-          : "/account";
-
-      let requirement:
-        LegalUpdateRequirement;
-
-      try {
-        requirement =
-          await getLegalUpdateRequirement();
-      } catch {
-        await logout();
-
-        setError(
-          "Nie udało się sprawdzić aktualności dokumentów. Spróbuj zalogować się ponownie.",
-        );
-
-        return;
-      }
-
-      if (requirement !== "none") {
+      if (
+        result.nextStep
+          .signInStep ===
+        "CONFIRM_SIGN_IN_WITH_TOTP_CODE"
+      ) {
+        /*
+         * Cognito has verified the password but requires possession
+         * of the configured authenticator as the second factor.
+         */
         setPassword("");
+        setTotpCode("");
 
-        setDestinationAfterLogin(
-          destination,
-        );
-
-        setLegalRequirement(
-          requirement,
+        setRequiresTotp(
+          true,
         );
 
         return;
       }
 
-      markCurrentLegalVerified();
+      if (
+        !result.isSignedIn
+      ) {
+        setError(
+          "Logowanie wymaga wykonania dodatkowego kroku, którego aplikacja obecnie nie obsługuje.",
+        );
 
-      navigateAfterLogin(
-        destination,
-      );
-    } catch (caughtError) {
+        return;
+      }
+
+      await completeSignedInFlow();
+    } catch (
+      caughtError
+    ) {
       if (
         isUserNotConfirmedError(
           caughtError,
@@ -223,7 +317,87 @@ export default function LoginForm({
         ),
       );
     } finally {
-      setIsLoading(false);
+      setIsLoading(
+        false,
+      );
+    }
+  }
+
+  async function handleTotpSubmit(
+    event:
+      FormEvent<HTMLFormElement>,
+  ) {
+    event.preventDefault();
+
+    setError("");
+
+    if (
+      totpCode.length !== 6
+    ) {
+      setError(
+        "Wpisz pełny 6-cyfrowy kod z aplikacji uwierzytelniającej.",
+      );
+
+      return;
+    }
+
+    setIsLoading(true);
+
+    try {
+      const result =
+        await confirmSignIn({
+          challengeResponse:
+            totpCode,
+        });
+
+      if (
+        !result.isSignedIn
+      ) {
+        setError(
+          "Logowanie wymaga wykonania dodatkowego kroku.",
+        );
+
+        return;
+      }
+
+      setRequiresTotp(
+        false,
+      );
+
+      setTotpCode("");
+
+      await completeSignedInFlow();
+    } catch (
+      caughtError
+    ) {
+      if (
+        caughtError
+          instanceof Error &&
+        caughtError.name ===
+          "NotAuthorizedException"
+      ) {
+        setRequiresTotp(
+          false,
+        );
+
+        setTotpCode("");
+
+        setError(
+          "Sesja logowania wygasła. Wpisz ponownie adres e-mail i hasło.",
+        );
+
+        return;
+      }
+
+      setError(
+        getTotpErrorMessage(
+          caughtError,
+        ),
+      );
+    } finally {
+      setIsLoading(
+        false,
+      );
     }
   }
 
@@ -236,7 +410,9 @@ export default function LoginForm({
     }
 
     setLegalError("");
-    setIsAcceptingLegal(true);
+    setIsAcceptingLegal(
+      true,
+    );
 
     try {
       await acceptCurrentLegal();
@@ -246,11 +422,20 @@ export default function LoginForm({
       const destination =
         destinationAfterLogin;
 
-      setLegalRequirement(null);
-      setDestinationAfterLogin(null);
+      setLegalRequirement(
+        null,
+      );
 
-      navigateAfterLogin(destination);
-    } catch (caughtError) {
+      setDestinationAfterLogin(
+        null,
+      );
+
+      navigateAfterLogin(
+        destination,
+      );
+    } catch (
+      caughtError
+    ) {
       console.error(
         "Failed to accept legal documents:",
         caughtError,
@@ -260,23 +445,39 @@ export default function LoginForm({
         "Nie udało się zapisać akceptacji dokumentów. Spróbuj ponownie.",
       );
     } finally {
-      setIsAcceptingLegal(false);
+      setIsAcceptingLegal(
+        false,
+      );
     }
   }
 
   async function handleLegalLogout() {
     setLegalError("");
-    setIsAcceptingLegal(true);
+    setIsAcceptingLegal(
+      true,
+    );
 
     try {
       await logout();
 
-      setLegalRequirement(null);
-      setDestinationAfterLogin(null);
+      setLegalRequirement(
+        null,
+      );
+
+      setDestinationAfterLogin(
+        null,
+      );
+
       setPassword("");
+      setTotpCode("");
+      setRequiresTotp(
+        false,
+      );
 
       router.refresh();
-    } catch (caughtError) {
+    } catch (
+      caughtError
+    ) {
       console.error(
         "Failed to log out:",
         caughtError,
@@ -286,7 +487,9 @@ export default function LoginForm({
         "Nie udało się wylogować. Spróbuj ponownie.",
       );
     } finally {
-      setIsAcceptingLegal(false);
+      setIsAcceptingLegal(
+        false,
+      );
     }
   }
 
@@ -295,7 +498,10 @@ export default function LoginForm({
       | "/admin"
       | "/account",
   ) {
-    router.push(destination);
+    router.push(
+      destination,
+    );
+
     router.refresh();
   }
 
@@ -303,7 +509,88 @@ export default function LoginForm({
     setError("");
 
     onForgotPasswordClick(
-      normalizeEmail(email),
+      normalizeEmail(
+        email,
+      ),
+    );
+  }
+
+  if (
+    requiresTotp
+  ) {
+    return (
+      <div>
+        <div className="mb-8">
+          <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-300">
+            Weryfikacja dwuetapowa
+          </p>
+
+          <h1 className="mt-3 text-3xl font-bold tracking-tight text-zinc-100">
+            Wpisz kod uwierzytelniający
+          </h1>
+
+          <p className="mt-3 text-sm leading-6 text-zinc-400">
+            Otwórz aplikację
+            uwierzytelniającą
+            i wpisz aktualny
+            6-cyfrowy kod.
+          </p>
+        </div>
+
+        <form
+          onSubmit={
+            handleTotpSubmit
+          }
+          className="space-y-5"
+        >
+          <div>
+            <label className="mb-3 block text-sm font-medium text-zinc-300">
+              Kod TOTP
+            </label>
+
+            <VerificationCodeInput
+              value={
+                totpCode
+              }
+              onChange={
+                setTotpCode
+              }
+              disabled={
+                isLoading
+              }
+            />
+          </div>
+
+          {error && (
+            <StatusMessage tone="error">
+              {error}
+            </StatusMessage>
+          )}
+
+          <Button
+            type="submit"
+            fullWidth
+            disabled={
+              isLoading ||
+              totpCode.length !==
+                6
+            }
+          >
+            {isLoading
+              ? "Weryfikowanie..."
+              : "Potwierdź logowanie"}
+          </Button>
+        </form>
+
+        <p className="mt-6 text-center text-xs leading-5 text-zinc-500">
+          Jeżeli utraciłeś
+          dostęp do aplikacji
+          uwierzytelniającej,
+          odzyskanie dostępu
+          wymaga administracyjnego
+          resetu MFA.
+        </p>
+      </div>
     );
   }
 
@@ -316,13 +603,16 @@ export default function LoginForm({
           </h1>
 
           <p className="mt-2 text-sm leading-6 text-zinc-400">
-            Zaloguj się, aby kontynuować
+            Zaloguj się,
+            aby kontynuować
             naukę.
           </p>
         </div>
 
         <form
-          onSubmit={handleSubmit}
+          onSubmit={
+            handleSubmit
+          }
           className="space-y-5"
         >
           <FormField
@@ -334,14 +624,20 @@ export default function LoginForm({
               type="email"
               autoComplete="email"
               value={email}
-              onChange={(event) =>
+              onChange={(
+                event,
+              ) =>
                 setEmail(
-                  event.target.value,
+                  event
+                    .target
+                    .value,
                 )
               }
               placeholder="Wpisz swój e-mail"
               required
-              disabled={isLoading}
+              disabled={
+                isLoading
+              }
             />
           </FormField>
 
@@ -359,15 +655,23 @@ export default function LoginForm({
                       : "password"
                   }
                   autoComplete="current-password"
-                  value={password}
-                  onChange={(event) =>
+                  value={
+                    password
+                  }
+                  onChange={(
+                    event,
+                  ) =>
                     setPassword(
-                      event.target.value,
+                      event
+                        .target
+                        .value,
                     )
                   }
                   placeholder="Wpisz swoje hasło"
                   required
-                  disabled={isLoading}
+                  disabled={
+                    isLoading
+                  }
                   className="pr-20"
                 />
 
@@ -375,11 +679,15 @@ export default function LoginForm({
                   type="button"
                   onClick={() =>
                     setShowPassword(
-                      (current) =>
+                      (
+                        current,
+                      ) =>
                         !current,
                     )
                   }
-                  disabled={isLoading}
+                  disabled={
+                    isLoading
+                  }
                   className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-semibold text-zinc-400 transition-colors hover:text-zinc-100 disabled:opacity-50"
                   aria-label={
                     showPassword
@@ -400,10 +708,13 @@ export default function LoginForm({
                 onClick={
                   handleForgotPassword
                 }
-                disabled={isLoading}
+                disabled={
+                  isLoading
+                }
                 className="text-sm font-semibold text-blue-400 transition-colors hover:text-blue-300 disabled:opacity-50"
               >
-                Nie pamiętasz hasła?
+                Nie pamiętasz
+                hasła?
               </button>
             </div>
           </div>
@@ -417,7 +728,9 @@ export default function LoginForm({
           <Button
             type="submit"
             fullWidth
-            disabled={isLoading}
+            disabled={
+              isLoading
+            }
           >
             {isLoading
               ? "Logowanie..."
@@ -426,11 +739,16 @@ export default function LoginForm({
         </form>
 
         <p className="mt-7 text-center text-sm text-zinc-400">
-          Nie masz jeszcze konta?{" "}
+          Nie masz jeszcze
+          konta?{" "}
           <button
             type="button"
-            onClick={onRegisterClick}
-            disabled={isLoading}
+            onClick={
+              onRegisterClick
+            }
+            disabled={
+              isLoading
+            }
             className="font-semibold text-blue-400 transition-colors hover:text-blue-300 disabled:opacity-50"
           >
             Utwórz konto
@@ -446,7 +764,9 @@ export default function LoginForm({
           isSubmitting={
             isAcceptingLegal
           }
-          error={legalError}
+          error={
+            legalError
+          }
           onAccept={
             handleLegalAccept
           }
@@ -462,7 +782,9 @@ export default function LoginForm({
 function normalizeEmail(
   email: string,
 ): string {
-  return email.trim().toLowerCase();
+  return email
+    .trim()
+    .toLowerCase();
 }
 
 function isUserNotConfirmedError(
@@ -478,11 +800,15 @@ function isUserNotConfirmedError(
 function getLoginErrorMessage(
   error: unknown,
 ): string {
-  if (!(error instanceof Error)) {
+  if (
+    !(error instanceof Error)
+  ) {
     return "Nie udało się zalogować.";
   }
 
-  switch (error.name) {
+  switch (
+    error.name
+  ) {
     case "UserNotFoundException":
     case "NotAuthorizedException":
       return "Nieprawidłowy adres e-mail lub hasło.";
@@ -493,5 +819,29 @@ function getLoginErrorMessage(
 
     default:
       return "Nie udało się zalogować. Spróbuj ponownie.";
+  }
+}
+
+function getTotpErrorMessage(
+  error: unknown,
+): string {
+  if (
+    !(error instanceof Error)
+  ) {
+    return "Nie udało się zweryfikować kodu.";
+  }
+
+  switch (
+    error.name
+  ) {
+    case "CodeMismatchException":
+      return "Kod jest nieprawidłowy. Sprawdź aplikację uwierzytelniającą i spróbuj ponownie.";
+
+    case "LimitExceededException":
+    case "TooManyRequestsException":
+      return "Wykonano zbyt wiele prób. Spróbuj ponownie później.";
+
+    default:
+      return "Nie udało się zweryfikować kodu. Spróbuj ponownie.";
   }
 }

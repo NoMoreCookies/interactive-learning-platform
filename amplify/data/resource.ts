@@ -10,12 +10,24 @@ import {
 } from "../auth/post-confirmation/resource";
 
 import {
+  checkoutStatus,
+} from "./checkout-status/resource";
+
+import {
+  createCheckoutSession,
+} from "./create-checkout-session/resource";
+
+import {
   premiumLessonAssetUrl,
 } from "./premium-lesson-asset-url/resource";
 
 import {
   premiumLessonContent,
 } from "./premium-lesson-content/resource";
+
+import {
+  premiumStatus,
+} from "./premium-status/resource";
 
 import {
   publicCatalog,
@@ -35,10 +47,14 @@ import {
 
 export const acceptCurrentLegal =
   defineFunction({
-    name: "accept-current-legal",
+    name:
+      "accept-current-legal",
+
     entry:
       "./accept-current-legal/handler.ts",
-    resourceGroupName: "data",
+
+    resourceGroupName:
+      "data",
   });
 
 const schema = a
@@ -50,14 +66,29 @@ const schema = a
      * Only fields safe for public exposure are included here.
      */
     PublicCourse: a.customType({
-      id: a.id().required(),
-      title: a.string().required(),
-      slug: a.string().required(),
-      description: a.string(),
-      subject: a.string(),
-      level: a.string(),
-      thumbnailPath: a.string(),
-      order: a.integer().required(),
+      id:
+        a.id().required(),
+
+      title:
+        a.string().required(),
+
+      slug:
+        a.string().required(),
+
+      description:
+        a.string(),
+
+      subject:
+        a.string(),
+
+      level:
+        a.string(),
+
+      thumbnailPath:
+        a.string(),
+
+      order:
+        a.integer().required(),
     }),
 
     /*
@@ -67,26 +98,50 @@ const schema = a
      * tasks, answers, and solutions are intentionally excluded.
      */
     PublicLesson: a.customType({
-      id: a.id().required(),
-      title: a.string().required(),
-      slug: a.string().required(),
-      description: a.string(),
-      durationMinutes: a.integer(),
-      order: a.integer().required(),
+      id:
+        a.id().required(),
+
+      title:
+        a.string().required(),
+
+      slug:
+        a.string().required(),
+
+      description:
+        a.string(),
+
+      durationMinutes:
+        a.integer(),
+
+      order:
+        a.integer().required(),
     }),
 
     /*
      * Public representation of a module and its published lessons.
      */
     PublicModule: a.customType({
-      id: a.id().required(),
-      title: a.string().required(),
-      slug: a.string().required(),
-      description: a.string(),
-      order: a.integer().required(),
-      lessons: a
-        .ref("PublicLesson")
-        .array(),
+      id:
+        a.id().required(),
+
+      title:
+        a.string().required(),
+
+      slug:
+        a.string().required(),
+
+      description:
+        a.string(),
+
+      order:
+        a.integer().required(),
+
+      lessons:
+        a
+          .ref(
+            "PublicLesson",
+          )
+          .array(),
     }),
 
     /*
@@ -96,27 +151,85 @@ const schema = a
      * Course -> Module -> Lesson.
      */
     PublicCourseOutline: a.customType({
-      id: a.id().required(),
-      title: a.string().required(),
-      slug: a.string().required(),
-      description: a.string(),
-      subject: a.string(),
-      level: a.string(),
-      thumbnailPath: a.string(),
-      order: a.integer().required(),
-      modules: a
-        .ref("PublicModule")
-        .array(),
+      id:
+        a.id().required(),
+
+      title:
+        a.string().required(),
+
+      slug:
+        a.string().required(),
+
+      description:
+        a.string(),
+
+      subject:
+        a.string(),
+
+      level:
+        a.string(),
+
+      thumbnailPath:
+        a.string(),
+
+      order:
+        a.integer().required(),
+
+      modules:
+        a
+          .ref(
+            "PublicModule",
+          )
+          .array(),
     }),
+
+    /*
+     * Result returned after redirecting back from Stripe Checkout.
+     */
+    MyCheckoutResult: a.customType({
+      status:
+        a.string().required(),
+
+      accessUntil:
+        a.datetime(),
+    }),
+
+    /*
+     * Result of attempting to create a Stripe Checkout Session.
+     *
+     * READY:
+     *   url contains the Stripe-hosted Checkout URL.
+     *
+     * RATE_LIMITED:
+     *   retryAfterSeconds contains the remaining cooldown.
+     */
+    CreateCheckoutSessionResult:
+      a.customType({
+        status:
+          a.string().required(),
+
+        url:
+          a.string(),
+
+        retryAfterSeconds:
+          a.integer(),
+      }),
 
     /*
      * Premium lesson note DTO.
      */
     PremiumLessonNote: a.customType({
-      id: a.id().required(),
-      title: a.string().required(),
-      content: a.string().required(),
-      order: a.integer().required(),
+      id:
+        a.id().required(),
+
+      title:
+        a.string().required(),
+
+      content:
+        a.string().required(),
+
+      order:
+        a.integer().required(),
     }),
 
     /*
@@ -126,10 +239,17 @@ const schema = a
      * They are fetched separately only when requested.
      */
     PremiumLessonTask: a.customType({
-      id: a.id().required(),
-      title: a.string().required(),
-      content: a.string().required(),
-      order: a.integer().required(),
+      id:
+        a.id().required(),
+
+      title:
+        a.string().required(),
+
+      content:
+        a.string().required(),
+
+      order:
+        a.integer().required(),
     }),
 
     /*
@@ -139,36 +259,144 @@ const schema = a
      * The frontend only learns whether an asset exists.
      */
     PremiumLessonContent: a.customType({
-      lessonId: a.id().required(),
-      hasVideo: a
-        .boolean()
-        .required(),
-      hasMaterials: a
-        .boolean()
-        .required(),
-      notes: a
-        .ref("PremiumLessonNote")
-        .array(),
-      tasks: a
-        .ref("PremiumLessonTask")
-        .array(),
+      lessonId:
+        a.id().required(),
+
+      hasVideo:
+        a
+          .boolean()
+          .required(),
+
+      hasMaterials:
+        a
+          .boolean()
+          .required(),
+
+      notes:
+        a
+          .ref(
+            "PremiumLessonNote",
+          )
+          .array(),
+
+      tasks:
+        a
+          .ref(
+            "PremiumLessonTask",
+          )
+          .array(),
+    }),
+
+    /*
+     * Current authenticated user's Premium status.
+     *
+     * Only fields safe for frontend display are exposed.
+     */
+    MyPremiumStatus: a.customType({
+      active:
+        a
+          .boolean()
+          .required(),
+
+      accessUntil:
+        a.datetime(),
     }),
 
     /*
      * Short answer for a single task.
      */
     TaskAnswer: a.customType({
-      taskId: a.id().required(),
-      answer: a.string(),
+      taskId:
+        a.id().required(),
+
+      answer:
+        a.string(),
     }),
 
     /*
      * Full solution for a single task.
      */
     TaskSolution: a.customType({
-      taskId: a.id().required(),
-      solution: a.string(),
+      taskId:
+        a.id().required(),
+
+      solution:
+        a.string(),
     }),
+
+    /*
+     * Creates a Stripe-hosted Checkout Session for an authenticated
+     * user.
+     *
+     * The browser selects only a trusted plan code. Price, user
+     * identity, access duration, and redirect URLs are resolved by
+     * the backend.
+     */
+    createCheckoutSession: a
+      .query()
+      .arguments({
+        planCode:
+          a.string().required(),
+      })
+      .returns(
+        a.ref(
+          "CreateCheckoutSessionResult",
+        ),
+      )
+      .authorization((allow) => [
+        allow.authenticated(),
+      ])
+      .handler(
+        a.handler.function(
+          createCheckoutSession,
+        ),
+      ),
+
+    /*
+     * Returns the current authenticated user's Premium status.
+     *
+     * The caller does not provide a userId. The Lambda resolves the
+     * user exclusively from the authenticated Cognito identity.
+     */
+    getMyPremiumStatus: a
+      .query()
+      .returns(
+        a.ref(
+          "MyPremiumStatus",
+        ),
+      )
+      .authorization((allow) => [
+        allow.authenticated(),
+      ])
+      .handler(
+        a.handler.function(
+          premiumStatus,
+        ),
+      ),
+
+    /*
+     * Returns the processing result of one Checkout Session belonging
+     * to the currently authenticated user.
+     */
+    getMyCheckoutResult: a
+      .query()
+      .arguments({
+        sessionId:
+          a.string().required(),
+      })
+      .returns(
+        a.ref(
+          "MyCheckoutResult",
+        ),
+      )
+      .authorization((allow) => [
+        allow.authenticated(),
+      ])
+      .handler(
+        a.handler.function(
+          checkoutStatus,
+        ),
+      ),
 
     /*
      * Public course catalog endpoint.
@@ -176,7 +404,11 @@ const schema = a
     listPublishedCourses: a
       .query()
       .returns(
-        a.ref("PublicCourse").array(),
+        a
+          .ref(
+            "PublicCourse",
+          )
+          .array(),
       )
       .authorization((allow) => [
         allow.publicApiKey(),
@@ -193,10 +425,13 @@ const schema = a
     getPublishedCourseOutline: a
       .query()
       .arguments({
-        slug: a.string().required(),
+        slug:
+          a.string().required(),
       })
       .returns(
-        a.ref("PublicCourseOutline"),
+        a.ref(
+          "PublicCourseOutline",
+        ),
       )
       .authorization((allow) => [
         allow.publicApiKey(),
@@ -210,19 +445,26 @@ const schema = a
     /*
      * Premium lesson content endpoint.
      *
-     * Before subscription entitlements are implemented,
-     * access is intentionally restricted to ADMIN only.
+     * AppSync requires an authenticated Cognito user.
+     * The Lambda performs the actual premium authorization using
+     * the user's current Entitlement record.
+     *
+     * ADMIN users are allowed by the Lambda without a billing
+     * entitlement.
      */
     getPremiumLessonContent: a
       .query()
       .arguments({
-        lessonId: a.id().required(),
+        lessonId:
+          a.id().required(),
       })
       .returns(
-        a.ref("PremiumLessonContent"),
+        a.ref(
+          "PremiumLessonContent",
+        ),
       )
       .authorization((allow) => [
-        allow.group("ADMIN"),
+        allow.authenticated(),
       ])
       .handler(
         a.handler.function(
@@ -233,19 +475,26 @@ const schema = a
     /*
      * Returns a short-lived S3 URL for one premium lesson asset.
      *
+     * AppSync requires authentication. The Lambda then verifies
+     * premium entitlement and the full publication hierarchy.
+     *
      * The caller provides only lessonId and asset type.
      * The S3 path is resolved exclusively by the backend.
      */
     getPremiumLessonAssetUrl: a
       .query()
       .arguments({
-        lessonId: a.id().required(),
+        lessonId:
+          a.id().required(),
+
         assetType:
           a.string().required(),
       })
-      .returns(a.string())
+      .returns(
+        a.string(),
+      )
       .authorization((allow) => [
-        allow.group("ADMIN"),
+        allow.authenticated(),
       ])
       .handler(
         a.handler.function(
@@ -255,17 +504,23 @@ const schema = a
 
     /*
      * Task answer endpoint.
+     *
+     * Authentication is enforced by AppSync.
+     * Premium authorization is enforced by the Lambda.
      */
     getTaskAnswer: a
       .query()
       .arguments({
-        taskId: a.id().required(),
+        taskId:
+          a.id().required(),
       })
       .returns(
-        a.ref("TaskAnswer"),
+        a.ref(
+          "TaskAnswer",
+        ),
       )
       .authorization((allow) => [
-        allow.group("ADMIN"),
+        allow.authenticated(),
       ])
       .handler(
         a.handler.function(
@@ -275,17 +530,23 @@ const schema = a
 
     /*
      * Full task solution endpoint.
+     *
+     * Authentication is enforced by AppSync.
+     * Premium authorization is enforced by the Lambda.
      */
     getTaskSolution: a
       .query()
       .arguments({
-        taskId: a.id().required(),
+        taskId:
+          a.id().required(),
       })
       .returns(
-        a.ref("TaskSolution"),
+        a.ref(
+          "TaskSolution",
+        ),
       )
       .authorization((allow) => [
-        allow.group("ADMIN"),
+        allow.authenticated(),
       ])
       .handler(
         a.handler.function(
@@ -300,30 +561,77 @@ const schema = a
      */
     Course: a
       .model({
-        title: a.string().required(),
-        slug: a.string().required(),
-        description: a.string(),
-        subject: a.enum([
-          "MATHEMATICS",
-          "PHYSICS",
-          "COMPUTER_SCIENCE",
-        ]),
-        level: a.enum([
-          "BASIC",
-          "EXTENDED",
-        ]),
-        thumbnailPath: a.string(),
-        order: a.integer().required(),
-        published: a
-          .boolean()
-          .default(false),
-        modules: a.hasMany(
-          "Module",
-          "courseId",
-        ),
+        title:
+          a.string().required(),
+
+        slug:
+          a.string().required(),
+
+        description:
+          a.string(),
+
+        subject:
+          a.enum([
+            "MATHEMATICS",
+            "PHYSICS",
+            "COMPUTER_SCIENCE",
+          ]),
+
+        level:
+          a.enum([
+            "BASIC",
+            "EXTENDED",
+          ]),
+
+        thumbnailPath:
+          a.string(),
+
+        order:
+          a.integer().required(),
+
+        published:
+          a
+            .boolean()
+            .default(false),
+
+        modules:
+          a.hasMany(
+            "Module",
+            "courseId",
+          ),
       })
+
+      /*
+       * Public outline access pattern:
+       *
+       * slug -> Course
+       *
+       * Only attributes required by the public course DTO and the
+       * publication check are projected into the index.
+       */
+      .secondaryIndexes((index) => [
+        index("slug")
+          .name(
+            "gsi-Course.slug",
+          )
+          .projection(
+            "INCLUDE",
+            [
+              "title",
+              "description",
+              "subject",
+              "level",
+              "thumbnailPath",
+              "order",
+              "published",
+            ],
+          ),
+      ])
+
       .authorization((allow) => [
-        allow.group("ADMIN"),
+        allow.group(
+          "ADMIN",
+        ),
       ]),
 
     /*
@@ -331,25 +639,42 @@ const schema = a
      */
     Module: a
       .model({
-        courseId: a.id().required(),
-        title: a.string().required(),
-        slug: a.string().required(),
-        description: a.string(),
-        order: a.integer().required(),
-        published: a
-          .boolean()
-          .default(false),
-        course: a.belongsTo(
-          "Course",
-          "courseId",
-        ),
-        lessons: a.hasMany(
-          "Lesson",
-          "moduleId",
-        ),
+        courseId:
+          a.id().required(),
+
+        title:
+          a.string().required(),
+
+        slug:
+          a.string().required(),
+
+        description:
+          a.string(),
+
+        order:
+          a.integer().required(),
+
+        published:
+          a
+            .boolean()
+            .default(false),
+
+        course:
+          a.belongsTo(
+            "Course",
+            "courseId",
+          ),
+
+        lessons:
+          a.hasMany(
+            "Lesson",
+            "moduleId",
+          ),
       })
       .authorization((allow) => [
-        allow.group("ADMIN"),
+        allow.group(
+          "ADMIN",
+        ),
       ]),
 
     /*
@@ -360,32 +685,57 @@ const schema = a
      */
     Lesson: a
       .model({
-        moduleId: a.id().required(),
-        title: a.string().required(),
-        slug: a.string().required(),
-        description: a.string(),
-        durationMinutes: a.integer(),
-        order: a.integer().required(),
-        videoPath: a.string(),
-        materialsPath: a.string(),
-        published: a
-          .boolean()
-          .default(false),
-        module: a.belongsTo(
-          "Module",
-          "moduleId",
-        ),
-        notes: a.hasMany(
-          "LessonNote",
-          "lessonId",
-        ),
-        tasks: a.hasMany(
-          "LessonTask",
-          "lessonId",
-        ),
+        moduleId:
+          a.id().required(),
+
+        title:
+          a.string().required(),
+
+        slug:
+          a.string().required(),
+
+        description:
+          a.string(),
+
+        durationMinutes:
+          a.integer(),
+
+        order:
+          a.integer().required(),
+
+        videoPath:
+          a.string(),
+
+        materialsPath:
+          a.string(),
+
+        published:
+          a
+            .boolean()
+            .default(false),
+
+        module:
+          a.belongsTo(
+            "Module",
+            "moduleId",
+          ),
+
+        notes:
+          a.hasMany(
+            "LessonNote",
+            "lessonId",
+          ),
+
+        tasks:
+          a.hasMany(
+            "LessonTask",
+            "lessonId",
+          ),
       })
       .authorization((allow) => [
-        allow.group("ADMIN"),
+        allow.group(
+          "ADMIN",
+        ),
       ]),
 
     /*
@@ -393,19 +743,30 @@ const schema = a
      */
     LessonNote: a
       .model({
-        lessonId: a.id().required(),
-        title: a.string().required(),
-        content: a
-          .string()
-          .required(),
-        order: a.integer().required(),
-        lesson: a.belongsTo(
-          "Lesson",
-          "lessonId",
-        ),
+        lessonId:
+          a.id().required(),
+
+        title:
+          a.string().required(),
+
+        content:
+          a
+            .string()
+            .required(),
+
+        order:
+          a.integer().required(),
+
+        lesson:
+          a.belongsTo(
+            "Lesson",
+            "lessonId",
+          ),
       })
       .authorization((allow) => [
-        allow.group("ADMIN"),
+        allow.group(
+          "ADMIN",
+        ),
       ]),
 
     /*
@@ -415,55 +776,97 @@ const schema = a
      */
     LessonTask: a
       .model({
-        lessonId: a.id().required(),
-        title: a.string().required(),
-        content: a
-          .string()
-          .required(),
-        answer: a.string(),
-        solution: a.string(),
-        order: a.integer().required(),
-        lesson: a.belongsTo(
-          "Lesson",
-          "lessonId",
-        ),
+        lessonId:
+          a.id().required(),
+
+        title:
+          a.string().required(),
+
+        content:
+          a
+            .string()
+            .required(),
+
+        answer:
+          a.string(),
+
+        solution:
+          a.string(),
+
+        order:
+          a.integer().required(),
+
+        lesson:
+          a.belongsTo(
+            "Lesson",
+            "lessonId",
+          ),
       })
       .authorization((allow) => [
-        allow.group("ADMIN"),
+        allow.group(
+          "ADMIN",
+        ),
       ]),
 
+    /*
+     * Legal document acceptance history.
+     */
     LegalAcceptance: a
       .model({
-        userId: a.string().required(),
-        owner: a.string().required(),
-        termsVersion: a
-          .string()
-          .required(),
-        privacyVersion: a
-          .string()
-          .required(),
-        acceptedAt: a
-          .datetime()
-          .required(),
+        userId:
+          a.string().required(),
+
+        owner:
+          a.string().required(),
+
+        termsVersion:
+          a
+            .string()
+            .required(),
+
+        privacyVersion:
+          a
+            .string()
+            .required(),
+
+        acceptedAt:
+          a
+            .datetime()
+            .required(),
       })
       .authorization((allow) => [
         allow
-          .ownerDefinedIn("owner")
-          .to(["read"]),
+          .ownerDefinedIn(
+            "owner",
+          )
+          .to([
+            "read",
+          ]),
+
         allow
-          .group("ADMIN")
-          .to(["read"]),
+          .group(
+            "ADMIN",
+          )
+          .to([
+            "read",
+          ]),
       ]),
 
+    /*
+     * Accepts the current legal document versions.
+     */
     acceptCurrentLegal: a
       .mutation()
       .arguments({
         termsVersion:
           a.string().required(),
+
         privacyVersion:
           a.string().required(),
       })
-      .returns(a.boolean())
+      .returns(
+        a.boolean(),
+      )
       .authorization((allow) => [
         allow.authenticated(),
       ])
@@ -475,22 +878,30 @@ const schema = a
   })
   .authorization((allow) => [
     allow
-      .resource(postConfirmation)
-      .to(["mutate"]),
+      .resource(
+        postConfirmation,
+      )
+      .to([
+        "mutate",
+      ]),
   ]);
 
 export type Schema =
-  ClientSchema<typeof schema>;
+  ClientSchema<
+    typeof schema
+  >;
 
-export const data = defineData({
-  schema,
+export const data =
+  defineData({
+    schema,
 
-  authorizationModes: {
-    defaultAuthorizationMode:
-      "userPool",
+    authorizationModes: {
+      defaultAuthorizationMode:
+        "userPool",
 
-    apiKeyAuthorizationMode: {
-      expiresInDays: 365,
+      apiKeyAuthorizationMode: {
+        expiresInDays:
+          365,
+      },
     },
-  },
-});
+  });

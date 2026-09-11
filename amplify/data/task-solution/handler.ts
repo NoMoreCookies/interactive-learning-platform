@@ -4,6 +4,10 @@ import {
   type AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 
+import {
+  hasPremiumAccess,
+} from "../../shared/premium-access";
+
 import type {
   Schema,
 } from "../resource";
@@ -18,7 +22,8 @@ function getRequiredString(
   item: DynamoDbItem,
   fieldName: string,
 ): string {
-  const value = item[fieldName];
+  const value =
+    item[fieldName];
 
   if (
     !value ||
@@ -37,7 +42,8 @@ function getOptionalString(
   item: DynamoDbItem,
   fieldName: string,
 ): string | null {
-  const value = item[fieldName];
+  const value =
+    item[fieldName];
 
   if (!value) {
     return null;
@@ -59,7 +65,8 @@ function getRequiredBoolean(
   item: DynamoDbItem,
   fieldName: string,
 ): boolean {
-  const value = item[fieldName];
+  const value =
+    item[fieldName];
 
   if (
     !value ||
@@ -74,78 +81,6 @@ function getRequiredBoolean(
   return value.BOOL;
 }
 
-function getIdentityGroups(
-  identity: unknown,
-): string[] {
-  if (
-    !identity ||
-    typeof identity !== "object"
-  ) {
-    return [];
-  }
-
-  const identityRecord =
-    identity as Record<
-      string,
-      unknown
-    >;
-
-  const directGroups =
-    identityRecord.groups;
-
-  if (
-    Array.isArray(directGroups)
-  ) {
-    return directGroups.filter(
-      (group): group is string =>
-        typeof group === "string",
-    );
-  }
-
-  const claims =
-    identityRecord.claims;
-
-  if (
-    !claims ||
-    typeof claims !== "object"
-  ) {
-    return [];
-  }
-
-  const claimGroups =
-    (
-      claims as Record<
-        string,
-        unknown
-      >
-    )["cognito:groups"];
-
-  if (
-    Array.isArray(claimGroups)
-  ) {
-    return claimGroups.filter(
-      (group): group is string =>
-        typeof group === "string",
-    );
-  }
-
-  if (
-    typeof claimGroups === "string"
-  ) {
-    return [claimGroups];
-  }
-
-  return [];
-}
-
-function isAdminIdentity(
-  identity: unknown,
-): boolean {
-  return getIdentityGroups(
-    identity,
-  ).includes("ADMIN");
-}
-
 async function getItemById(
   tableName: string,
   id: string,
@@ -156,7 +91,8 @@ async function getItemById(
   const result =
     await dynamoDb.send(
       new GetItemCommand({
-        TableName: tableName,
+        TableName:
+          tableName,
 
         Key: {
           id: {
@@ -178,44 +114,32 @@ async function getItemById(
 export const handler:
   Schema["getTaskSolution"]["functionHandler"] =
   async (event) => {
-    /*
-     * Defense in depth.
-     *
-     * AppSync performs the first ADMIN check.
-     * Lambda independently verifies the identity again.
-     */
-    if (
-      !isAdminIdentity(
-        event.identity,
-      )
-    ) {
-      console.warn(
-        "Task solution request rejected for non-admin identity.",
-      );
-
-      throw new Error(
-        "Brak uprawnień do rozwiązania.",
-      );
-    }
-
     const courseTableName =
-      process.env.COURSE_TABLE_NAME;
+      process.env
+        .COURSE_TABLE_NAME;
 
     const moduleTableName =
-      process.env.MODULE_TABLE_NAME;
+      process.env
+        .MODULE_TABLE_NAME;
 
     const lessonTableName =
-      process.env.LESSON_TABLE_NAME;
+      process.env
+        .LESSON_TABLE_NAME;
 
     const lessonTaskTableName =
       process.env
         .LESSON_TASK_TABLE_NAME;
 
+    const entitlementTableName =
+      process.env
+        .ENTITLEMENT_TABLE_NAME;
+
     if (
       !courseTableName ||
       !moduleTableName ||
       !lessonTableName ||
-      !lessonTaskTableName
+      !lessonTaskTableName ||
+      !entitlementTableName
     ) {
       console.error(
         "Task solution table configuration is incomplete.",
@@ -226,8 +150,60 @@ export const handler:
       );
     }
 
+    /*
+     * Authorization boundary:
+     *
+     * 1. AppSync requires an authenticated Cognito user.
+     * 2. Lambda independently requires either:
+     *    - ADMIN membership, or
+     *    - an active PREMIUM entitlement.
+     *
+     * The entitlement lookup uses the authenticated AppSync
+     * identity. The browser never supplies its own userId.
+     */
+    let premiumAccessAllowed:
+      boolean;
+
+    try {
+      premiumAccessAllowed =
+        await hasPremiumAccess({
+          identity:
+            event.identity,
+
+          entitlementTableName,
+        });
+    } catch (error) {
+      console.error(
+        "Task solution authorization check failed.",
+        {
+          errorName:
+            error instanceof Error
+              ? error.name
+              : "UnknownError",
+        },
+      );
+
+      throw new Error(
+        "Nie udało się zweryfikować dostępu.",
+      );
+    }
+
+    if (
+      !premiumAccessAllowed
+    ) {
+      console.warn(
+        "Task solution request rejected.",
+      );
+
+      throw new Error(
+        "Brak uprawnień do rozwiązania.",
+      );
+    }
+
     const taskId =
-      event.arguments.taskId.trim();
+      event.arguments
+        .taskId
+        .trim();
 
     if (!taskId) {
       return null;
@@ -241,7 +217,7 @@ export const handler:
        * - lessonId
        * - solution
        *
-       * answer is deliberately NOT read.
+       * answer is deliberately not read.
        */
       const taskItem =
         await getItemById(
@@ -255,9 +231,12 @@ export const handler:
           ].join(", "),
 
           {
-            "#id": "id",
+            "#id":
+              "id",
+
             "#lessonId":
               "lessonId",
+
             "#solution":
               "solution",
           },
@@ -274,7 +253,8 @@ export const handler:
         );
 
       /*
-       * Verify Lesson publication state.
+       * Premium access never grants access to content belonging
+       * to an unpublished Lesson.
        */
       const lessonItem =
         await getItemById(
@@ -289,6 +269,7 @@ export const handler:
           {
             "#moduleId":
               "moduleId",
+
             "#published":
               "published",
           },
@@ -314,7 +295,7 @@ export const handler:
         );
 
       /*
-       * Verify Module publication state.
+       * Verify parent Module publication.
        */
       const moduleItem =
         await getItemById(
@@ -329,6 +310,7 @@ export const handler:
           {
             "#courseId":
               "courseId",
+
             "#published":
               "published",
           },
@@ -354,7 +336,7 @@ export const handler:
         );
 
       /*
-       * Verify Course publication state.
+       * Verify parent Course publication.
        */
       const courseItem =
         await getItemById(
@@ -382,6 +364,10 @@ export const handler:
         return null;
       }
 
+      /*
+       * Only after authorization and the complete publication
+       * hierarchy have passed may the solution leave the backend.
+       */
       return {
         taskId:
           getRequiredString(

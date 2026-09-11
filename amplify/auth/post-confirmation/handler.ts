@@ -2,37 +2,18 @@ import type {
   PostConfirmationTriggerHandler,
 } from "aws-lambda";
 
-import { Amplify } from "aws-amplify";
-import { generateClient } from "aws-amplify/data";
-
 import {
-  getAmplifyDataClientConfig,
-} from "@aws-amplify/backend/function/runtime";
-
-import {
-  env,
-} from "$amplify/env/post-confirmation";
+  ConditionalCheckFailedException,
+  DynamoDBClient,
+  PutItemCommand,
+} from "@aws-sdk/client-dynamodb";
 
 import {
   buildLegalAcceptanceId,
 } from "../../../lib/legal-acceptance-id";
 
-import type {
-  Schema,
-} from "../../data/resource";
-
-const {
-  resourceConfig,
-  libraryOptions,
-} = await getAmplifyDataClientConfig(env);
-
-Amplify.configure(
-  resourceConfig,
-  libraryOptions,
-);
-
-const client =
-  generateClient<Schema>();
+const dynamoDb =
+  new DynamoDBClient({});
 
 export const handler: PostConfirmationTriggerHandler =
   async (event) => {
@@ -69,10 +50,13 @@ export const handler: PostConfirmationTriggerHandler =
         {
           triggerSource:
             event.triggerSource,
+
           hasUserId:
             Boolean(userId),
+
           hasTermsVersion:
             Boolean(termsVersion),
+
           hasPrivacyVersion:
             Boolean(privacyVersion),
         },
@@ -80,6 +64,20 @@ export const handler: PostConfirmationTriggerHandler =
 
       throw new Error(
         "Brak wymaganych danych dotyczących akceptacji dokumentów.",
+      );
+    }
+
+    const tableName =
+      process.env
+        .LEGAL_ACCEPTANCE_TABLE_NAME;
+
+    if (!tableName) {
+      console.error(
+        "Legal acceptance table name is not configured.",
+      );
+
+      throw new Error(
+        "Nie udało się zapisać akceptacji dokumentów.",
       );
     }
 
@@ -93,23 +91,99 @@ export const handler: PostConfirmationTriggerHandler =
         privacyVersion,
       );
 
-    const acceptedAt =
+    const timestamp =
       new Date().toISOString();
 
-    const { errors } =
-      await client.models.LegalAcceptance.create({
-        id: acceptanceId,
-        userId,
-        owner,
-        termsVersion,
-        privacyVersion,
-        acceptedAt,
-      });
+    try {
+      await dynamoDb.send(
+        new PutItemCommand({
+          TableName:
+            tableName,
 
-    if (errors?.length) {
+          Item: {
+            id: {
+              S:
+                acceptanceId,
+            },
+
+            userId: {
+              S:
+                userId,
+            },
+
+            owner: {
+              S:
+                owner,
+            },
+
+            termsVersion: {
+              S:
+                termsVersion,
+            },
+
+            privacyVersion: {
+              S:
+                privacyVersion,
+            },
+
+            acceptedAt: {
+              S:
+                timestamp,
+            },
+
+            createdAt: {
+              S:
+                timestamp,
+            },
+
+            updatedAt: {
+              S:
+                timestamp,
+            },
+
+            __typename: {
+              S:
+                "LegalAcceptance",
+            },
+          },
+
+          /*
+           * Cognito may retry the trigger.
+           *
+           * A deterministic acceptance ID together with this
+           * condition makes the operation idempotent.
+           */
+          ConditionExpression:
+            "attribute_not_exists(#id)",
+
+          ExpressionAttributeNames: {
+            "#id":
+              "id",
+          },
+        }),
+      );
+    } catch (error) {
+      /*
+       * The exact same acceptance already exists.
+       *
+       * This is a successful idempotent outcome rather than
+       * an application failure.
+       */
+      if (
+        error instanceof
+        ConditionalCheckFailedException
+      ) {
+        return event;
+      }
+
       console.error(
-        "Failed to create legal acceptance:",
-        errors,
+        "Failed to create legal acceptance.",
+        {
+          errorName:
+            error instanceof Error
+              ? error.name
+              : "UnknownError",
+        },
       );
 
       throw new Error(

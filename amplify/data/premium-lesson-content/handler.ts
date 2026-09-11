@@ -6,6 +6,10 @@ import {
   type ScanCommandInput,
 } from "@aws-sdk/client-dynamodb";
 
+import {
+  hasPremiumAccess,
+} from "../../shared/premium-access";
+
 import type {
   Schema,
 } from "../resource";
@@ -124,93 +128,6 @@ function getRequiredBoolean(
   }
 
   return value.BOOL;
-}
-
-function getIdentityGroups(
-  identity: unknown,
-): string[] {
-  if (
-    !identity ||
-    typeof identity !== "object"
-  ) {
-    return [];
-  }
-
-  const identityRecord =
-    identity as Record<
-      string,
-      unknown
-    >;
-
-  const directGroups =
-    identityRecord.groups;
-
-  if (
-    Array.isArray(
-      directGroups,
-    )
-  ) {
-    return directGroups.filter(
-      (
-        group,
-      ): group is string =>
-        typeof group ===
-        "string",
-    );
-  }
-
-  const claims =
-    identityRecord.claims;
-
-  if (
-    !claims ||
-    typeof claims !== "object"
-  ) {
-    return [];
-  }
-
-  const claimGroups = (
-    claims as Record<
-      string,
-      unknown
-    >
-  )["cognito:groups"];
-
-  if (
-    Array.isArray(
-      claimGroups,
-    )
-  ) {
-    return claimGroups.filter(
-      (
-        group,
-      ): group is string =>
-        typeof group ===
-        "string",
-    );
-  }
-
-  if (
-    typeof claimGroups ===
-    "string"
-  ) {
-    return claimGroups
-      .split(",")
-      .map((group) =>
-        group.trim(),
-      )
-      .filter(Boolean);
-  }
-
-  return [];
-}
-
-function isAdminIdentity(
-  identity: unknown,
-): boolean {
-  return getIdentityGroups(
-    identity,
-  ).includes("ADMIN");
 }
 
 async function getItemById(
@@ -434,24 +351,6 @@ function sortByOrderAndTitle<
 export const handler:
   Schema["getPremiumLessonContent"]["functionHandler"] =
   async (event) => {
-    /*
-     * Layer 1 authorization is AppSync allow.group("ADMIN").
-     * This is an additional defense-in-depth check.
-     */
-    if (
-      !isAdminIdentity(
-        event.identity,
-      )
-    ) {
-      console.warn(
-        "Premium lesson content request rejected for non-admin identity.",
-      );
-
-      throw new Error(
-        "Brak uprawnień do treści premium.",
-      );
-    }
-
     const courseTableName =
       process.env.COURSE_TABLE_NAME;
 
@@ -469,12 +368,17 @@ export const handler:
       process.env
         .LESSON_TASK_TABLE_NAME;
 
+    const entitlementTableName =
+      process.env
+        .ENTITLEMENT_TABLE_NAME;
+
     if (
       !courseTableName ||
       !moduleTableName ||
       !lessonTableName ||
       !lessonNoteTableName ||
-      !lessonTaskTableName
+      !lessonTaskTableName ||
+      !entitlementTableName
     ) {
       console.error(
         "Premium lesson content table configuration is incomplete.",
@@ -482,6 +386,55 @@ export const handler:
 
       throw new Error(
         "Nie udało się pobrać treści lekcji.",
+      );
+    }
+
+    /*
+     * Authorization has two layers:
+     *
+     * 1. AppSync requires an authenticated Cognito user.
+     * 2. This Lambda verifies ADMIN membership or a current
+     *    PREMIUM entitlement.
+     *
+     * The userId used for the entitlement lookup comes from the
+     * authenticated AppSync identity, never from browser input.
+     */
+    let premiumAccessAllowed:
+      boolean;
+
+    try {
+      premiumAccessAllowed =
+        await hasPremiumAccess({
+          identity:
+            event.identity,
+
+          entitlementTableName,
+        });
+    } catch (error) {
+      console.error(
+        "Premium lesson content authorization check failed.",
+        {
+          errorName:
+            error instanceof Error
+              ? error.name
+              : "UnknownError",
+        },
+      );
+
+      throw new Error(
+        "Nie udało się zweryfikować dostępu do treści premium.",
+      );
+    }
+
+    if (
+      !premiumAccessAllowed
+    ) {
+      console.warn(
+        "Premium lesson content request rejected.",
+      );
+
+      throw new Error(
+        "Brak uprawnień do treści premium.",
       );
     }
 
@@ -529,6 +482,9 @@ export const handler:
         return null;
       }
 
+      /*
+       * A premium entitlement never grants access to drafts.
+       */
       if (
         !getRequiredBoolean(
           lessonItem,
@@ -632,8 +588,8 @@ export const handler:
       }
 
       /*
-       * Only after the complete publication hierarchy has passed
-       * do we read premium child data.
+       * Only after both authorization and the complete publication
+       * hierarchy have passed do we read premium child data.
        */
       const [
         noteItems,

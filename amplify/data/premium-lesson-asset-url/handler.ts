@@ -13,14 +13,17 @@ import {
   getSignedUrl,
 } from "@aws-sdk/s3-request-presigner";
 
-import type {
-  Schema,
-} from "../resource";
-
 import {
   env,
 } from "$amplify/env/premium-lesson-asset-url";
 
+import {
+  hasPremiumAccess,
+} from "../../shared/premium-access";
+
+import type {
+  Schema,
+} from "../resource";
 
 const dynamoDbClient =
   new DynamoDBClient({});
@@ -95,7 +98,10 @@ function getRequiredBoolean(
   const value =
     item?.[fieldName]?.BOOL;
 
-  if (typeof value !== "boolean") {
+  if (
+    typeof value !==
+    "boolean"
+  ) {
     throw new Error(
       `Missing required boolean field: ${fieldName}`,
     );
@@ -104,104 +110,17 @@ function getRequiredBoolean(
   return value;
 }
 
-function getIdentityGroups(
-  identity: unknown,
-): string[] {
-  if (
-    !identity ||
-    typeof identity !== "object"
-  ) {
-    return [];
-  }
-
-  const identityRecord =
-    identity as Record<
-      string,
-      unknown
-    >;
-
-  const directGroups =
-    identityRecord.groups;
-
-  if (
-    Array.isArray(directGroups)
-  ) {
-    return directGroups.filter(
-      (
-        group,
-      ): group is string =>
-        typeof group ===
-        "string",
-    );
-  }
-
-  const claims =
-    identityRecord.claims;
-
-  if (
-    !claims ||
-    typeof claims !== "object"
-  ) {
-    return [];
-  }
-
-  const groupsClaim = (
-    claims as Record<
-      string,
-      unknown
-    >
-  )["cognito:groups"];
-
-  if (
-    Array.isArray(groupsClaim)
-  ) {
-    return groupsClaim.filter(
-      (
-        group,
-      ): group is string =>
-        typeof group ===
-        "string",
-    );
-  }
-
-  if (
-    typeof groupsClaim ===
-    "string"
-  ) {
-    return groupsClaim
-      .split(",")
-      .map((group) =>
-        group.trim(),
-      )
-      .filter(Boolean);
-  }
-
-  return [];
-}
-
-function assertAdmin(
-  identity: unknown,
-): void {
-  const groups =
-    getIdentityGroups(identity);
-
-  if (
-    !groups.includes("ADMIN")
-  ) {
-    throw new Error(
-      "Unauthorized",
-    );
-  }
-}
-
 function normalizeAssetType(
   value: string,
 ): AssetType {
   const normalizedValue =
-    value.trim().toUpperCase();
+    value
+      .trim()
+      .toUpperCase();
 
   if (
-    normalizedValue === "VIDEO" ||
+    normalizedValue ===
+      "VIDEO" ||
     normalizedValue ===
       "MATERIALS"
   ) {
@@ -271,20 +190,50 @@ function isExpectedAssetPath(
   );
 }
 
-export const handler: Schema["getPremiumLessonAssetUrl"]["functionHandler"] =
+export const handler:
+  Schema["getPremiumLessonAssetUrl"]["functionHandler"] =
   async (event) => {
     try {
+      const entitlementTableName =
+        getRequiredEnvironmentVariable(
+          "ENTITLEMENT_TABLE_NAME",
+        );
+
       /*
-       * AppSync already restricts this query to ADMIN.
+       * Authorization boundary:
        *
-       * This second check is intentional defense in depth.
+       * 1. AppSync requires an authenticated Cognito user.
+       * 2. This Lambda independently verifies either:
+       *    - ADMIN membership, or
+       *    - a current PREMIUM entitlement.
+       *
+       * The entitlement lookup uses the Cognito identity from
+       * AppSync. The browser never provides its own userId.
        */
-      assertAdmin(
-        event.identity,
-      );
+      const premiumAccessAllowed =
+        await hasPremiumAccess({
+          identity:
+            event.identity,
+
+          entitlementTableName,
+        });
+
+      if (
+        !premiumAccessAllowed
+      ) {
+        console.warn(
+          "Premium lesson asset request rejected.",
+        );
+
+        throw new Error(
+          "Unauthorized",
+        );
+      }
 
       const lessonId =
-        event.arguments.lessonId.trim();
+        event.arguments
+          .lessonId
+          .trim();
 
       if (!lessonId) {
         throw new Error(
@@ -294,7 +243,8 @@ export const handler: Schema["getPremiumLessonAssetUrl"]["functionHandler"] =
 
       const assetType =
         normalizeAssetType(
-          event.arguments.assetType,
+          event.arguments
+            .assetType,
         );
 
       const courseTableName =
@@ -317,7 +267,8 @@ export const handler: Schema["getPremiumLessonAssetUrl"]["functionHandler"] =
        * this function read access through allow.resource(...).
        */
       const bucketName =
-        env.COURSE_PLATFORM_FILES_BUCKET_NAME;
+        env
+          .COURSE_PLATFORM_FILES_BUCKET_NAME;
 
       const assetAttribute =
         assetType === "VIDEO"
@@ -347,28 +298,40 @@ export const handler: Schema["getPremiumLessonAssetUrl"]["functionHandler"] =
 
             ExpressionAttributeNames:
               {
-                "#id": "id",
+                "#id":
+                  "id",
+
                 "#moduleId":
                   "moduleId",
+
                 "#published":
                   "published",
+
                 "#assetPath":
                   assetAttribute,
               },
           }),
         );
 
-      if (!lessonResult.Item) {
+      if (
+        !lessonResult.Item
+      ) {
         return null;
       }
 
+      /*
+       * Premium access never grants access to unpublished
+       * lessons.
+       */
       const lessonPublished =
         getRequiredBoolean(
           lessonResult.Item,
           "published",
         );
 
-      if (!lessonPublished) {
+      if (
+        !lessonPublished
+      ) {
         return null;
       }
 
@@ -389,10 +352,10 @@ export const handler: Schema["getPremiumLessonAssetUrl"]["functionHandler"] =
       }
 
       /*
-       * Do not trust even a path stored in the database blindly.
+       * Do not trust even an S3 key stored in DynamoDB blindly.
        *
-       * A compromised/admin-mistyped record must not turn this
-       * function into an arbitrary S3 object signer.
+       * A corrupted or incorrectly configured database record
+       * must not turn this function into an arbitrary S3 signer.
        */
       if (
         !isExpectedAssetPath(
@@ -405,6 +368,9 @@ export const handler: Schema["getPremiumLessonAssetUrl"]["functionHandler"] =
         );
       }
 
+      /*
+       * Verify Module publication.
+       */
       const moduleResult =
         await dynamoDbClient.send(
           new GetItemCommand({
@@ -424,13 +390,16 @@ export const handler: Schema["getPremiumLessonAssetUrl"]["functionHandler"] =
               {
                 "#courseId":
                   "courseId",
+
                 "#published":
                   "published",
               },
           }),
         );
 
-      if (!moduleResult.Item) {
+      if (
+        !moduleResult.Item
+      ) {
         return null;
       }
 
@@ -440,7 +409,9 @@ export const handler: Schema["getPremiumLessonAssetUrl"]["functionHandler"] =
           "published",
         );
 
-      if (!modulePublished) {
+      if (
+        !modulePublished
+      ) {
         return null;
       }
 
@@ -450,6 +421,9 @@ export const handler: Schema["getPremiumLessonAssetUrl"]["functionHandler"] =
           "courseId",
         );
 
+      /*
+       * Verify Course publication.
+       */
       const courseResult =
         await dynamoDbClient.send(
           new GetItemCommand({
@@ -473,7 +447,9 @@ export const handler: Schema["getPremiumLessonAssetUrl"]["functionHandler"] =
           }),
         );
 
-      if (!courseResult.Item) {
+      if (
+        !courseResult.Item
+      ) {
         return null;
       }
 
@@ -483,16 +459,18 @@ export const handler: Schema["getPremiumLessonAssetUrl"]["functionHandler"] =
           "published",
         );
 
-      if (!coursePublished) {
+      if (
+        !coursePublished
+      ) {
         return null;
       }
 
       /*
-       * Materials need only a short window because the user starts
-       * a direct download immediately.
+       * Materials need only a short URL lifetime because the
+       * download starts immediately.
        *
        * Video needs a longer window because browsers may issue
-       * additional Range requests while seeking/streaming.
+       * additional Range requests while streaming or seeking.
        */
       const expiresIn =
         assetType === "VIDEO"
@@ -501,8 +479,11 @@ export const handler: Schema["getPremiumLessonAssetUrl"]["functionHandler"] =
 
       const getObjectCommand =
         new GetObjectCommand({
-          Bucket: bucketName,
-          Key: assetPath,
+          Bucket:
+            bucketName,
+
+          Key:
+            assetPath,
 
           ...(assetType ===
           "MATERIALS"
@@ -513,6 +494,12 @@ export const handler: Schema["getPremiumLessonAssetUrl"]["functionHandler"] =
             : {}),
         });
 
+      /*
+       * The S3 object key never leaves the backend.
+       *
+       * The browser receives only a short-lived signed URL for
+       * the exact object associated with this published lesson.
+       */
       const signedUrl =
         await getSignedUrl(
           s3Client,
@@ -525,7 +512,13 @@ export const handler: Schema["getPremiumLessonAssetUrl"]["functionHandler"] =
       return signedUrl;
     } catch (error) {
       /*
-       * Do not log object keys, URLs, JWT claims or user data.
+       * Do not log:
+       *
+       * - S3 object keys,
+       * - signed URLs,
+       * - JWT claims,
+       * - Cognito user IDs,
+       * - entitlement contents.
        */
       console.error(
         "premium-lesson-asset-url failed",

@@ -19,6 +19,9 @@ import {
 
 import VerificationCodeInput from "./VerificationCodeInput";
 
+const RESEND_COOLDOWN_SECONDS =
+  30;
+
 type ConfirmSignUpFormProps = {
   email: string;
   onBack: () => void;
@@ -30,31 +33,55 @@ export default function ConfirmSignUpForm({
   onBack,
   onConfirmed,
 }: ConfirmSignUpFormProps) {
-  const [code, setCode] =
-    useState("");
+  const [
+    code,
+    setCode,
+  ] = useState("");
 
-  const [error, setError] =
-    useState("");
+  const [
+    error,
+    setError,
+  ] = useState("");
 
-  const [message, setMessage] =
-    useState("");
+  const [
+    message,
+    setMessage,
+  ] = useState("");
 
-  const [isLoading, setIsLoading] =
-    useState(false);
+  const [
+    isLoading,
+    setIsLoading,
+  ] = useState(false);
 
   const [
     isResending,
     setIsResending,
   ] = useState(false);
 
+  const [
+    resendRetryAt,
+    setResendRetryAt,
+  ] = useState<
+    number | null
+  >(null);
+
+  const [
+    resendCooldownSeconds,
+    setResendCooldownSeconds,
+  ] = useState(0);
+
   const redirectTimeoutRef =
-    useRef<ReturnType<
-      typeof setTimeout
-    > | null>(null);
+    useRef<
+      ReturnType<
+        typeof setTimeout
+      > | null
+    >(null);
 
   useEffect(() => {
     return () => {
-      if (redirectTimeoutRef.current) {
+      if (
+        redirectTimeoutRef.current
+      ) {
         clearTimeout(
           redirectTimeoutRef.current,
         );
@@ -62,18 +89,95 @@ export default function ConfirmSignUpForm({
     };
   }, []);
 
+  useEffect(() => {
+    if (
+      resendRetryAt === null
+    ) {
+      setResendCooldownSeconds(
+        0,
+      );
+
+      return;
+    }
+
+    const retryAt =
+      resendRetryAt;
+
+    function updateCooldown() {
+      const remainingSeconds =
+        Math.max(
+          0,
+
+          Math.ceil(
+            (
+              retryAt -
+              Date.now()
+            ) / 1000,
+          ),
+        );
+
+      setResendCooldownSeconds(
+        remainingSeconds,
+      );
+
+      if (
+        remainingSeconds ===
+        0
+      ) {
+        setResendRetryAt(
+          null,
+        );
+      }
+    }
+
+    updateCooldown();
+
+    const intervalId =
+      window.setInterval(
+        updateCooldown,
+        1000,
+      );
+
+    return () => {
+      window.clearInterval(
+        intervalId,
+      );
+    };
+  }, [
+    resendRetryAt,
+  ]);
+
+  function startResendCooldown() {
+    const retryAt =
+      Date.now() +
+      RESEND_COOLDOWN_SECONDS *
+        1000;
+
+    setResendRetryAt(
+      retryAt,
+    );
+
+    setResendCooldownSeconds(
+      RESEND_COOLDOWN_SECONDS,
+    );
+  }
+
   async function handleSubmit(
-    event: FormEvent<HTMLFormElement>,
+    event:
+      FormEvent<HTMLFormElement>,
   ) {
     event.preventDefault();
 
     setError("");
     setMessage("");
 
-    if (code.length !== 6) {
+    if (
+      code.length !== 6
+    ) {
       setError(
         "Wpisz pełny 6-cyfrowy kod.",
       );
+
       return;
     }
 
@@ -82,14 +186,20 @@ export default function ConfirmSignUpForm({
     try {
       const result =
         await confirmSignUp({
-          username: email,
-          confirmationCode: code,
+          username:
+            email,
+
+          confirmationCode:
+            code,
         });
 
-      if (!result.isSignUpComplete) {
+      if (
+        !result.isSignUpComplete
+      ) {
         setError(
           "Potwierdzenie konta wymaga dodatkowego kroku.",
         );
+
         return;
       }
 
@@ -98,8 +208,13 @@ export default function ConfirmSignUpForm({
       );
 
       redirectTimeoutRef.current =
-        setTimeout(onConfirmed, 1200);
-    } catch (caughtError) {
+        setTimeout(
+          onConfirmed,
+          1200,
+        );
+    } catch (
+      caughtError
+    ) {
       setError(
         getConfirmationErrorMessage(
           caughtError,
@@ -111,19 +226,52 @@ export default function ConfirmSignUpForm({
   }
 
   async function handleResendCode() {
+    if (
+      isResending ||
+      resendCooldownSeconds >
+        0
+    ) {
+      return;
+    }
+
     setError("");
     setMessage("");
     setIsResending(true);
 
     try {
       await resendSignUpCode({
-        username: email,
+        username:
+          email,
       });
 
+      startResendCooldown();
+
       setMessage(
-        "Nowy kod został wysłany na podany adres e-mail.",
+        "Jeżeli konto wymaga potwierdzenia, nowy kod został wysłany na podany adres e-mail.",
       );
-    } catch (caughtError) {
+    } catch (
+      caughtError
+    ) {
+      /*
+       * Do not reveal whether an account exists.
+       *
+       * Treat UserNotFound as a generic successful-looking response
+       * so the UI cannot be used for account enumeration.
+       */
+      if (
+        isUserNotFoundError(
+          caughtError,
+        )
+      ) {
+        startResendCooldown();
+
+        setMessage(
+          "Jeżeli konto wymaga potwierdzenia, nowy kod został wysłany na podany adres e-mail.",
+        );
+
+        return;
+      }
+
       setError(
         getResendErrorMessage(
           caughtError,
@@ -135,19 +283,28 @@ export default function ConfirmSignUpForm({
   }
 
   const interactionDisabled =
-    isLoading || isResending;
+    isLoading ||
+    isResending;
+
+  const resendDisabled =
+    interactionDisabled ||
+    resendCooldownSeconds >
+      0;
 
   return (
     <div>
       <button
         type="button"
         onClick={onBack}
-        disabled={interactionDisabled}
+        disabled={
+          interactionDisabled
+        }
         className="mb-7 inline-flex items-center gap-2 text-sm font-medium text-zinc-400 transition hover:text-zinc-100 disabled:opacity-50"
       >
         <span aria-hidden="true">
           ←
         </span>
+
         Powrót
       </button>
 
@@ -157,12 +314,15 @@ export default function ConfirmSignUpForm({
         </div>
 
         <h1 className="text-3xl font-bold tracking-tight text-zinc-100">
-          Sprawdź swoją skrzynkę
+          Sprawdź swoją
+          skrzynkę
         </h1>
 
         <p className="mt-3 text-sm leading-6 text-zinc-400">
-          Wysłaliśmy 6-cyfrowy kod
-          potwierdzający na adres:
+          Wysłaliśmy
+          6-cyfrowy kod
+          potwierdzający na
+          adres:
         </p>
 
         <p className="mt-1 break-all font-semibold text-blue-400">
@@ -170,7 +330,11 @@ export default function ConfirmSignUpForm({
         </p>
       </div>
 
-      <form onSubmit={handleSubmit}>
+      <form
+        onSubmit={
+          handleSubmit
+        }
+      >
         <label className="mb-3 block text-sm font-medium text-zinc-300">
           Kod potwierdzający
         </label>
@@ -178,7 +342,9 @@ export default function ConfirmSignUpForm({
         <VerificationCodeInput
           value={code}
           onChange={setCode}
-          disabled={interactionDisabled}
+          disabled={
+            interactionDisabled
+          }
         />
 
         {error && (
@@ -216,27 +382,36 @@ export default function ConfirmSignUpForm({
 
       <div className="mt-6 text-center text-sm text-zinc-400">
         Nie dostałeś kodu?{" "}
+
         <button
           type="button"
           onClick={() =>
             void handleResendCode()
           }
-          disabled={interactionDisabled}
+          disabled={
+            resendDisabled
+          }
           className="font-semibold text-blue-400 transition-colors hover:text-blue-300 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {isResending
             ? "Wysyłanie..."
-            : "Wyślij ponownie"}
+            : resendCooldownSeconds >
+                0
+              ? `Wyślij ponownie za ${resendCooldownSeconds} s`
+              : "Wyślij ponownie"}
         </button>
       </div>
 
       <button
         type="button"
         onClick={onBack}
-        disabled={interactionDisabled}
+        disabled={
+          interactionDisabled
+        }
         className="mt-6 w-full text-center text-sm font-semibold text-zinc-400 transition hover:text-zinc-100 disabled:opacity-50"
       >
-        ← Zmień adres e-mail
+        ← Zmień adres
+        e-mail
       </button>
     </div>
   );
@@ -259,19 +434,34 @@ function MailIcon() {
         height="14"
         rx="2"
       />
+
       <path d="m3 7 9 6 9-6" />
     </svg>
+  );
+}
+
+function isUserNotFoundError(
+  error: unknown,
+): boolean {
+  return (
+    error instanceof Error &&
+    error.name ===
+      "UserNotFoundException"
   );
 }
 
 function getConfirmationErrorMessage(
   error: unknown,
 ): string {
-  if (!(error instanceof Error)) {
+  if (
+    !(error instanceof Error)
+  ) {
     return "Nie udało się potwierdzić konta.";
   }
 
-  switch (error.name) {
+  switch (
+    error.name
+  ) {
     case "CodeMismatchException":
       return "Podany kod jest nieprawidłowy.";
 
@@ -282,6 +472,7 @@ function getConfirmationErrorMessage(
       return "Konto zostało już potwierdzone lub operacja jest niedozwolona.";
 
     case "LimitExceededException":
+    case "TooManyRequestsException":
       return "Wykonano zbyt wiele prób. Spróbuj ponownie później.";
 
     default:
@@ -292,19 +483,21 @@ function getConfirmationErrorMessage(
 function getResendErrorMessage(
   error: unknown,
 ): string {
-  if (!(error instanceof Error)) {
+  if (
+    !(error instanceof Error)
+  ) {
     return "Nie udało się ponownie wysłać kodu.";
   }
 
-  switch (error.name) {
+  switch (
+    error.name
+  ) {
     case "LimitExceededException":
+    case "TooManyRequestsException":
       return "Kod był wysyłany zbyt wiele razy. Spróbuj ponownie później.";
 
-    case "UserNotFoundException":
-      return "Nie znaleziono konta z tym adresem e-mail.";
-
     case "InvalidParameterException":
-      return "Konto może być już potwierdzone.";
+      return "Nie udało się ponownie wysłać kodu. Konto może nie wymagać potwierdzenia.";
 
     default:
       return "Nie udało się ponownie wysłać kodu. Spróbuj ponownie.";

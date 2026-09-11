@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 import {
   use,
   useEffect,
@@ -13,6 +15,10 @@ import {
 import LessonNavigation from "@/components/lessons/LessonNavigation";
 import LessonNotes from "@/components/lessons/LessonNotes";
 import LessonTasks from "@/components/lessons/LessonTasks";
+
+import {
+  getMyPremiumStatus,
+} from "@/lib/services/billing-service";
 
 import {
   getLessonPageData,
@@ -45,6 +51,12 @@ type PremiumLessonContent =
     >
   >;
 
+type PremiumAccessState =
+  | "LOADING"
+  | "ALLOWED"
+  | "DENIED"
+  | "ERROR";
+
 export default function LessonPage({
   params,
 }: LessonPageProps) {
@@ -54,6 +66,7 @@ export default function LessonPage({
   } = use(params);
 
   const {
+    isAuthenticated,
     isAdmin,
     isLoading: isAuthLoading,
   } = useAuth();
@@ -75,55 +88,73 @@ export default function LessonPage({
     );
 
   const [
+    premiumAccessState,
+    setPremiumAccessState,
+  ] =
+    useState<PremiumAccessState>(
+      "LOADING",
+    );
+
+  const [
     isLoading,
     setIsLoading,
-  ] = useState(true);
+  ] =
+    useState(true);
 
   const [
     errorMessage,
     setErrorMessage,
-  ] = useState("");
+  ] =
+    useState("");
 
   const [
     isPremiumLoading,
     setIsPremiumLoading,
-  ] = useState(false);
+  ] =
+    useState(false);
 
   const [
     premiumError,
     setPremiumError,
-  ] = useState("");
+  ] =
+    useState("");
 
   const [
     videoUrl,
     setVideoUrl,
-  ] = useState("");
+  ] =
+    useState("");
 
   const [
     videoError,
     setVideoError,
-  ] = useState("");
+  ] =
+    useState("");
 
   const [
     isVideoLoading,
     setIsVideoLoading,
-  ] = useState(false);
+  ] =
+    useState(false);
 
   const [
     isDownloadingMaterials,
     setIsDownloadingMaterials,
-  ] = useState(false);
+  ] =
+    useState(false);
 
   const [
     materialsError,
     setMaterialsError,
-  ] = useState("");
+  ] =
+    useState("");
 
   /*
    * Load the public portion of the lesson.
    */
   useEffect(() => {
-    let isCancelled = false;
+    let isCancelled =
+      false;
 
     async function loadLesson() {
       setIsLoading(true);
@@ -176,7 +207,8 @@ export default function LessonPage({
     void loadLesson();
 
     return () => {
-      isCancelled = true;
+      isCancelled =
+        true;
     };
   }, [
     slug,
@@ -184,29 +216,134 @@ export default function LessonPage({
   ]);
 
   /*
-   * Premium data is currently requested only for ADMIN.
+   * Determine whether the authenticated user should attempt to
+   * load premium lesson content.
    *
-   * This frontend condition is only an optimization.
-   * AppSync and Lambda remain the actual authorization boundary.
+   * This state is used only for UX.
+   *
+   * The actual authorization boundary remains AppSync + Lambda +
+   * EntitlementTable. Manipulating this state in the browser must
+   * never grant access to premium data.
    */
   useEffect(() => {
-    let isCancelled = false;
+    let isCancelled =
+      false;
 
-    async function loadPremiumContent() {
+    async function loadPremiumAccess() {
       if (isAuthLoading) {
         return;
       }
 
-      if (
-        !isAdmin ||
-        !pageData?.lesson.id
-      ) {
-        setPremiumContent(null);
-        setPremiumError("");
+      if (!isAuthenticated) {
+        setPremiumAccessState(
+          "DENIED",
+        );
+
+        setPremiumContent(
+          null,
+        );
+
         return;
       }
 
-      setIsPremiumLoading(true);
+      if (isAdmin) {
+        setPremiumAccessState(
+          "ALLOWED",
+        );
+
+        return;
+      }
+
+      setPremiumAccessState(
+        "LOADING",
+      );
+
+      try {
+        const status =
+          await getMyPremiumStatus();
+
+        if (isCancelled) {
+          return;
+        }
+
+        setPremiumAccessState(
+          status.active
+            ? "ALLOWED"
+            : "DENIED",
+        );
+      } catch (error) {
+        if (isCancelled) {
+          return;
+        }
+
+        console.error(
+          "Nie udało się sprawdzić statusu Premium:",
+          {
+            errorName:
+              error instanceof Error
+                ? error.name
+                : "UnknownError",
+          },
+        );
+
+        /*
+         * Fail closed.
+         *
+         * A temporary failure to verify entitlement must never be
+         * interpreted as premium access.
+         */
+        setPremiumAccessState(
+          "ERROR",
+        );
+
+        setPremiumContent(
+          null,
+        );
+      }
+    }
+
+    void loadPremiumAccess();
+
+    return () => {
+      isCancelled =
+        true;
+    };
+  }, [
+    isAuthenticated,
+    isAdmin,
+    isAuthLoading,
+  ]);
+
+  /*
+   * Load premium lesson content only after the frontend has learned
+   * that the user should have access.
+   *
+   * The backend still performs the authoritative entitlement and
+   * publication checks independently.
+   */
+  useEffect(() => {
+    let isCancelled =
+      false;
+
+    async function loadPremiumContent() {
+      if (
+        premiumAccessState !==
+          "ALLOWED" ||
+        !pageData?.lesson.id
+      ) {
+        setPremiumContent(
+          null,
+        );
+
+        setPremiumError("");
+
+        return;
+      }
+
+      setIsPremiumLoading(
+        true,
+      );
+
       setPremiumError("");
 
       try {
@@ -219,7 +356,9 @@ export default function LessonPage({
           return;
         }
 
-        setPremiumContent(result);
+        setPremiumContent(
+          result,
+        );
       } catch (error) {
         if (isCancelled) {
           return;
@@ -227,17 +366,26 @@ export default function LessonPage({
 
         console.error(
           "Nie udało się pobrać treści premium lekcji:",
-          error,
+          {
+            errorName:
+              error instanceof Error
+                ? error.name
+                : "UnknownError",
+          },
         );
 
-        setPremiumContent(null);
+        setPremiumContent(
+          null,
+        );
 
         setPremiumError(
           "Nie udało się pobrać treści premium.",
         );
       } finally {
         if (!isCancelled) {
-          setIsPremiumLoading(false);
+          setIsPremiumLoading(
+            false,
+          );
         }
       }
     }
@@ -245,12 +393,12 @@ export default function LessonPage({
     void loadPremiumContent();
 
     return () => {
-      isCancelled = true;
+      isCancelled =
+        true;
     };
   }, [
-    isAdmin,
-    isAuthLoading,
     pageData?.lesson.id,
+    premiumAccessState,
   ]);
 
   /*
@@ -259,24 +407,35 @@ export default function LessonPage({
    * No S3 object path is available to this component.
    */
   useEffect(() => {
-    let isCancelled = false;
+    let isCancelled =
+      false;
 
     async function loadVideoUrl() {
       const lessonId =
         pageData?.lesson.id;
 
       const hasVideo =
-        premiumContent?.hasVideo ??
+        premiumContent
+          ?.hasVideo ??
         false;
 
-      if (!lessonId || !hasVideo) {
+      if (
+        !lessonId ||
+        !hasVideo
+      ) {
         setVideoUrl("");
         setVideoError("");
-        setIsVideoLoading(false);
+        setIsVideoLoading(
+          false,
+        );
+
         return;
       }
 
-      setIsVideoLoading(true);
+      setIsVideoLoading(
+        true,
+      );
+
       setVideoError("");
 
       try {
@@ -308,7 +467,12 @@ export default function LessonPage({
 
         console.error(
           "Nie udało się pobrać URL filmu:",
-          error,
+          {
+            errorName:
+              error instanceof Error
+                ? error.name
+                : "UnknownError",
+          },
         );
 
         setVideoUrl("");
@@ -318,7 +482,9 @@ export default function LessonPage({
         );
       } finally {
         if (!isCancelled) {
-          setIsVideoLoading(false);
+          setIsVideoLoading(
+            false,
+          );
         }
       }
     }
@@ -326,7 +492,8 @@ export default function LessonPage({
     void loadVideoUrl();
 
     return () => {
-      isCancelled = true;
+      isCancelled =
+        true;
     };
   }, [
     pageData?.lesson.id,
@@ -361,7 +528,10 @@ export default function LessonPage({
       return;
     }
 
-    setIsDownloadingMaterials(true);
+    setIsDownloadingMaterials(
+      true,
+    );
+
     setMaterialsError("");
 
     try {
@@ -378,11 +548,18 @@ export default function LessonPage({
       }
 
       const link =
-        document.createElement("a");
+        document.createElement(
+          "a",
+        );
 
-      link.href = url;
-      link.download = "";
-      link.rel = "noreferrer";
+      link.href =
+        url;
+
+      link.download =
+        "";
+
+      link.rel =
+        "noreferrer";
 
       document.body.appendChild(
         link,
@@ -393,7 +570,12 @@ export default function LessonPage({
     } catch (error) {
       console.error(
         "Nie udało się pobrać materiałów:",
-        error,
+        {
+          errorName:
+            error instanceof Error
+              ? error.name
+              : "UnknownError",
+        },
       );
 
       setMaterialsError(
@@ -439,7 +621,17 @@ export default function LessonPage({
     courseModule,
     lesson,
     navigation,
-  } = pageData;
+  } =
+    pageData;
+
+  const isAccessLoading =
+    isAuthLoading ||
+    premiumAccessState ===
+      "LOADING";
+
+  const canAccessPremium =
+    premiumAccessState ===
+    "ALLOWED";
 
   return (
     <main className="mx-auto min-h-screen max-w-5xl px-6 py-12">
@@ -455,13 +647,20 @@ export default function LessonPage({
         <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-sm text-zinc-400">
           <span>
             Lekcja{" "}
-            {navigation.lessonNumber} z{" "}
-            {navigation.totalLessons}
+            {
+              navigation.lessonNumber
+            }{" "}
+            z{" "}
+            {
+              navigation.totalLessons
+            }
           </span>
 
           <span>
             Moduł:{" "}
-            {courseModule.title}
+            {
+              courseModule.title
+            }
           </span>
 
           {lesson.durationMinutes !=
@@ -477,18 +676,148 @@ export default function LessonPage({
 
         {lesson.description && (
           <p className="mt-4 text-lg text-zinc-300">
-            {lesson.description}
+            {
+              lesson.description
+            }
           </p>
         )}
       </header>
 
-      {isAuthLoading ? (
+      {isAccessLoading && (
         <section className="mt-10 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-8">
           <p className="text-zinc-400">
             Sprawdzanie dostępu...
           </p>
         </section>
-      ) : isAdmin ? (
+      )}
+
+      {!isAccessLoading &&
+        premiumAccessState ===
+          "ERROR" && (
+          <section className="mt-10 rounded-2xl border border-red-500/30 bg-red-500/5 p-8">
+            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-red-300">
+              Nie udało się sprawdzić dostępu
+            </p>
+
+            <h2 className="mt-3 text-2xl font-semibold text-zinc-100">
+              Spróbuj ponownie za chwilę
+            </h2>
+
+            <p className="mt-3 max-w-2xl leading-7 text-zinc-400">
+              Nie udało się teraz zweryfikować
+              statusu Premium. Ze względów
+              bezpieczeństwa treść pozostaje
+              zablokowana.
+            </p>
+          </section>
+        )}
+
+      {!isAccessLoading &&
+        premiumAccessState ===
+          "DENIED" &&
+        !isAuthenticated && (
+          <section className="mt-10 overflow-hidden rounded-2xl border border-zinc-800 bg-gradient-to-br from-zinc-900 via-zinc-950 to-zinc-950 p-8 md:p-10">
+            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-300">
+              Treść Premium
+            </p>
+
+            <h2 className="mt-4 text-2xl font-bold text-zinc-100 md:text-3xl">
+              Zaloguj się, aby uzyskać dostęp
+            </h2>
+
+            <p className="mt-4 max-w-2xl leading-7 text-zinc-400">
+              Filmy, materiały, zadania,
+              odpowiedzi i pełne rozwiązania są
+              dostępne dla użytkowników z aktywnym
+              dostępem Premium.
+            </p>
+
+            <div className="mt-7 flex flex-wrap gap-4">
+              <Link
+                href="/auth"
+                className="rounded-xl bg-blue-600 px-5 py-3 font-semibold text-white transition hover:bg-blue-700"
+              >
+                Zaloguj się
+              </Link>
+
+              <Link
+                href="/account#premium"
+                className="rounded-xl border border-zinc-700 px-5 py-3 font-semibold text-zinc-200 transition hover:bg-zinc-900"
+              >
+                Zobacz Premium
+              </Link>
+            </div>
+          </section>
+        )}
+
+      {!isAccessLoading &&
+        premiumAccessState ===
+          "DENIED" &&
+        isAuthenticated && (
+          <section className="mt-10 overflow-hidden rounded-2xl border border-blue-500/20 bg-gradient-to-br from-blue-500/10 via-zinc-950 to-zinc-950 p-8 md:p-10">
+            <div className="grid gap-8 md:grid-cols-[1fr_auto] md:items-center">
+              <div>
+                <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-300">
+                  Dostęp Premium
+                </p>
+
+                <h2 className="mt-4 text-2xl font-bold text-zinc-100 md:text-3xl">
+                  Odblokuj tę lekcję
+                </h2>
+
+                <p className="mt-4 max-w-2xl leading-7 text-zinc-400">
+                  Uzyskaj pełny dostęp do filmów,
+                  materiałów do pobrania, zadań,
+                  odpowiedzi oraz szczegółowych
+                  rozwiązań.
+                </p>
+
+                <div className="mt-6 flex flex-wrap gap-x-6 gap-y-2 text-sm text-zinc-300">
+                  <span>
+                    ✓ Wszystkie filmy
+                  </span>
+
+                  <span>
+                    ✓ Materiały
+                  </span>
+
+                  <span>
+                    ✓ Zadania
+                  </span>
+
+                  <span>
+                    ✓ Rozwiązania
+                  </span>
+                </div>
+              </div>
+
+              <div className="w-full rounded-2xl border border-zinc-800 bg-zinc-950/80 p-6 md:w-64">
+                <p className="text-3xl font-bold text-zinc-100">
+                  49,99 zł
+                </p>
+
+                <p className="mt-1 text-sm text-zinc-500">
+                  30 dni dostępu
+                </p>
+
+                <Link
+                  href="/account#premium"
+                  className="mt-5 flex w-full items-center justify-center rounded-xl bg-blue-600 px-4 py-3 text-center font-semibold text-white transition hover:bg-blue-700"
+                >
+                  Odblokuj Premium
+                </Link>
+
+                <p className="mt-3 text-xs leading-5 text-zinc-500">
+                  Jednorazowa płatność.
+                  Dostęp nie odnawia się
+                  automatycznie.
+                </p>
+              </div>
+            </div>
+          </section>
+        )}
+
+      {canAccessPremium && (
         <>
           {isPremiumLoading && (
             <section className="mt-10 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-8">
@@ -521,25 +850,33 @@ export default function LessonPage({
                   {!isVideoLoading &&
                     videoUrl && (
                     <video
-                      key={videoUrl}
+                      key={
+                        videoUrl
+                      }
                       controls
                       preload="metadata"
                       className="aspect-video w-full rounded-2xl bg-black"
                     >
                       <source
-                        src={videoUrl}
+                        src={
+                          videoUrl
+                        }
                         type="video/mp4"
                       />
 
-                      Twoja przeglądarka
-                      nie obsługuje
-                      odtwarzania wideo.
+                      Twoja
+                      przeglądarka nie
+                      obsługuje
+                      odtwarzania
+                      wideo.
                     </video>
                   )}
 
                   {videoError && (
                     <p className="rounded-xl border border-red-500/40 bg-red-500/10 p-4 text-red-300">
-                      {videoError}
+                      {
+                        videoError
+                      }
                     </p>
                   )}
                 </section>
@@ -595,7 +932,9 @@ export default function LessonPage({
 
                   {materialsError && (
                     <p className="mt-4 text-center text-sm text-red-400">
-                      {materialsError}
+                      {
+                        materialsError
+                      }
                     </p>
                   )}
                 </section>
@@ -603,22 +942,12 @@ export default function LessonPage({
             </>
           )}
         </>
-      ) : (
-        <section className="mt-10 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-8">
-          <h2 className="text-xl font-semibold text-zinc-100">
-            Treść premium
-          </h2>
-
-          <p className="mt-3 leading-7 text-zinc-400">
-            Materiały premium tej
-            lekcji są obecnie
-            niedostępne.
-          </p>
-        </section>
       )}
 
       <LessonNavigation
-        courseSlug={course.slug}
+        courseSlug={
+          course.slug
+        }
         previousLesson={
           navigation.previousLesson
         }

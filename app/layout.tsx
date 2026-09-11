@@ -1,4 +1,7 @@
-import type { Metadata } from "next";
+import type {
+  Metadata,
+} from "next";
+
 import {
   Geist,
   Geist_Mono,
@@ -13,30 +16,52 @@ import Navbar from "@/components/layout/Navbar";
 import "./globals.css";
 import "katex/dist/katex.min.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
+/*
+ * Nonce-based CSP requires request-time rendering.
+ *
+ * The proxy generates a fresh nonce for each request. Forcing the
+ * root route segment to be dynamic prevents Next.js from serving a
+ * statically prerendered HTML document with a stale/missing nonce.
+ */
+export const dynamic =
+  "force-dynamic";
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
+const geistSans =
+  Geist({
+    variable:
+      "--font-geist-sans",
+    subsets: [
+      "latin",
+    ],
+  });
 
-export const metadata: Metadata = {
-  title: {
-    default:
-      "Kursy — matematyka, fizyka i informatyka",
-    template: "%s | Kursy",
-  },
-  description:
-    "Nowoczesna platforma edukacyjna z lekcjami wideo, notatkami, zadaniami i rozwiązaniami.",
-};
+const geistMono =
+  Geist_Mono({
+    variable:
+      "--font-geist-mono",
+    subsets: [
+      "latin",
+    ],
+  });
+
+export const metadata:
+  Metadata = {
+    title: {
+      default:
+        "Kursy — matematyka, fizyka i informatyka",
+      template:
+        "%s | Kursy",
+    },
+
+    description:
+      "Nowoczesna platforma edukacyjna z lekcjami wideo, notatkami, zadaniami i rozwiązaniami.",
+  };
 
 export default function RootLayout({
   children,
 }: Readonly<{
-  children: React.ReactNode;
+  children:
+    React.ReactNode;
 }>) {
   return (
     <html

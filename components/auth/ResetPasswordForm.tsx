@@ -21,9 +21,13 @@ import {
 
 import VerificationCodeInput from "./VerificationCodeInput";
 
+const RESEND_COOLDOWN_SECONDS =
+  30;
+
 type ResetPasswordFormProps = {
   defaultEmail?: string;
   onBack: () => void;
+
   onPasswordReset: (
     email: string,
   ) => void;
@@ -38,46 +42,90 @@ export default function ResetPasswordForm({
   onBack,
   onPasswordReset,
 }: ResetPasswordFormProps) {
-  const [step, setStep] =
-    useState<ResetStep>("request");
+  const [
+    step,
+    setStep,
+  ] =
+    useState<ResetStep>(
+      "request",
+    );
 
-  const [email, setEmail] =
-    useState(defaultEmail);
+  const [
+    email,
+    setEmail,
+  ] =
+    useState(
+      defaultEmail,
+    );
 
-  const [code, setCode] =
+  const [
+    code,
+    setCode,
+  ] =
     useState("");
 
-  const [newPassword, setNewPassword] =
+  const [
+    newPassword,
+    setNewPassword,
+  ] =
     useState("");
 
   const [
     repeatedPassword,
     setRepeatedPassword,
-  ] = useState("");
+  ] =
+    useState("");
 
   const [
     showPassword,
     setShowPassword,
-  ] = useState(false);
+  ] =
+    useState(false);
 
-  const [error, setError] =
+  const [
+    error,
+    setError,
+  ] =
     useState("");
 
-  const [message, setMessage] =
+  const [
+    message,
+    setMessage,
+  ] =
     useState("");
 
-  const [isLoading, setIsLoading] =
+  const [
+    isLoading,
+    setIsLoading,
+  ] =
     useState(false);
 
   const [
     isResending,
     setIsResending,
-  ] = useState(false);
+  ] =
+    useState(false);
+
+  const [
+    resendRetryAt,
+    setResendRetryAt,
+  ] =
+    useState<
+      number | null
+    >(null);
+
+  const [
+    resendCooldownSeconds,
+    setResendCooldownSeconds,
+  ] =
+    useState(0);
 
   const redirectTimeoutRef =
-    useRef<ReturnType<
-      typeof setTimeout
-    > | null>(null);
+    useRef<
+      ReturnType<
+        typeof setTimeout
+      > | null
+    >(null);
 
   useEffect(() => {
     return () => {
@@ -91,21 +139,100 @@ export default function ResetPasswordForm({
     };
   }, []);
 
+  useEffect(() => {
+    if (
+      resendRetryAt === null
+    ) {
+      setResendCooldownSeconds(
+        0,
+      );
+
+      return;
+    }
+
+    const retryAt =
+      resendRetryAt;
+
+    function updateCooldown() {
+      const remainingSeconds =
+        Math.max(
+          0,
+
+          Math.ceil(
+            (
+              retryAt -
+              Date.now()
+            ) / 1000,
+          ),
+        );
+
+      setResendCooldownSeconds(
+        remainingSeconds,
+      );
+
+      if (
+        remainingSeconds ===
+        0
+      ) {
+        setResendRetryAt(
+          null,
+        );
+      }
+    }
+
+    updateCooldown();
+
+    const intervalId =
+      window.setInterval(
+        updateCooldown,
+        1000,
+      );
+
+    return () => {
+      window.clearInterval(
+        intervalId,
+      );
+    };
+  }, [
+    resendRetryAt,
+  ]);
+
+  function startResendCooldown() {
+    const retryAt =
+      Date.now() +
+      RESEND_COOLDOWN_SECONDS *
+        1000;
+
+    setResendRetryAt(
+      retryAt,
+    );
+
+    setResendCooldownSeconds(
+      RESEND_COOLDOWN_SECONDS,
+    );
+  }
+
   async function handleRequestCode(
-    event: FormEvent<HTMLFormElement>,
+    event:
+      FormEvent<HTMLFormElement>,
   ) {
     event.preventDefault();
 
     const normalizedEmail =
-      normalizeEmail(email);
+      normalizeEmail(
+        email,
+      );
 
     setError("");
     setMessage("");
 
-    if (!normalizedEmail) {
+    if (
+      !normalizedEmail
+    ) {
       setError(
         "Wpisz adres e-mail.",
       );
+
       return;
     }
 
@@ -114,27 +241,36 @@ export default function ResetPasswordForm({
     try {
       const result =
         await resetPassword({
-          username: normalizedEmail,
+          username:
+            normalizedEmail,
         });
 
-      setEmail(normalizedEmail);
+      setEmail(
+        normalizedEmail,
+      );
 
       if (
-        result.nextStep
+        result
+          .nextStep
           .resetPasswordStep ===
         "CONFIRM_RESET_PASSWORD_WITH_CODE"
       ) {
-        setStep("confirm");
+        startResendCooldown();
+
+        setStep(
+          "confirm",
+        );
 
         setMessage(
-          "Kod do zmiany hasła został wysłany na Twój adres e-mail.",
+          "Jeżeli konto z tym adresem istnieje, kod do zmiany hasła został wysłany.",
         );
 
         return;
       }
 
       if (
-        result.nextStep
+        result
+          .nextStep
           .resetPasswordStep ===
         "DONE"
       ) {
@@ -151,7 +287,9 @@ export default function ResetPasswordForm({
             1200,
           );
       }
-    } catch (caughtError) {
+    } catch (
+      caughtError
+    ) {
       /*
        * Do not reveal whether an account exists
        * for the provided email address.
@@ -161,11 +299,18 @@ export default function ResetPasswordForm({
           caughtError,
         )
       ) {
-        setEmail(normalizedEmail);
-        setStep("confirm");
+        setEmail(
+          normalizedEmail,
+        );
+
+        startResendCooldown();
+
+        setStep(
+          "confirm",
+        );
 
         setMessage(
-          "Jeżeli konto z tym adresem istnieje, kod został wysłany.",
+          "Jeżeli konto z tym adresem istnieje, kod do zmiany hasła został wysłany.",
         );
 
         return;
@@ -182,20 +327,26 @@ export default function ResetPasswordForm({
   }
 
   async function handleConfirmReset(
-    event: FormEvent<HTMLFormElement>,
+    event:
+      FormEvent<HTMLFormElement>,
   ) {
     event.preventDefault();
 
     const normalizedEmail =
-      normalizeEmail(email);
+      normalizeEmail(
+        email,
+      );
 
     setError("");
     setMessage("");
 
-    if (code.length !== 6) {
+    if (
+      code.length !== 6
+    ) {
       setError(
         "Wpisz pełny 6-cyfrowy kod.",
       );
+
       return;
     }
 
@@ -206,15 +357,19 @@ export default function ResetPasswordForm({
       setError(
         "Podane hasła nie są takie same.",
       );
+
       return;
     }
 
     if (
-      !isPasswordValid(newPassword)
+      !isPasswordValid(
+        newPassword,
+      )
     ) {
       setError(
         "Hasło musi mieć co najmniej 8 znaków oraz zawierać małą literę, wielką literę, cyfrę i znak specjalny.",
       );
+
       return;
     }
 
@@ -222,8 +377,12 @@ export default function ResetPasswordForm({
 
     try {
       await confirmResetPassword({
-        username: normalizedEmail,
-        confirmationCode: code,
+        username:
+          normalizedEmail,
+
+        confirmationCode:
+          code,
+
         newPassword,
       });
 
@@ -239,7 +398,9 @@ export default function ResetPasswordForm({
             ),
           1200,
         );
-    } catch (caughtError) {
+    } catch (
+      caughtError
+    ) {
       setError(
         getConfirmationErrorMessage(
           caughtError,
@@ -251,8 +412,18 @@ export default function ResetPasswordForm({
   }
 
   async function handleResendCode() {
+    if (
+      isResending ||
+      resendCooldownSeconds >
+        0
+    ) {
+      return;
+    }
+
     const normalizedEmail =
-      normalizeEmail(email);
+      normalizeEmail(
+        email,
+      );
 
     setError("");
     setMessage("");
@@ -261,26 +432,34 @@ export default function ResetPasswordForm({
     try {
       const result =
         await resetPassword({
-          username: normalizedEmail,
+          username:
+            normalizedEmail,
         });
 
       if (
-        result.nextStep
+        result
+          .nextStep
           .resetPasswordStep ===
         "CONFIRM_RESET_PASSWORD_WITH_CODE"
       ) {
         setCode("");
 
+        startResendCooldown();
+
         setMessage(
-          "Nowy kod został wysłany na Twój adres e-mail.",
+          "Jeżeli konto z tym adresem istnieje, nowy kod został wysłany.",
         );
       }
-    } catch (caughtError) {
+    } catch (
+      caughtError
+    ) {
       if (
         isUserNotFoundError(
           caughtError,
         )
       ) {
+        startResendCooldown();
+
         setMessage(
           "Jeżeli konto z tym adresem istnieje, nowy kod został wysłany.",
         );
@@ -299,29 +478,51 @@ export default function ResetPasswordForm({
   }
 
   function handleChangeEmail() {
-    setStep("request");
+    setStep(
+      "request",
+    );
+
     setCode("");
     setNewPassword("");
     setRepeatedPassword("");
     setError("");
     setMessage("");
+
+    setResendRetryAt(
+      null,
+    );
+
+    setResendCooldownSeconds(
+      0,
+    );
   }
 
   const interactionDisabled =
-    isLoading || isResending;
+    isLoading ||
+    isResending;
 
-  if (step === "request") {
+  const resendDisabled =
+    interactionDisabled ||
+    resendCooldownSeconds >
+      0;
+
+  if (
+    step === "request"
+  ) {
     return (
       <div>
         <button
           type="button"
           onClick={onBack}
-          disabled={interactionDisabled}
+          disabled={
+            interactionDisabled
+          }
           className="mb-7 inline-flex items-center gap-2 text-sm font-medium text-zinc-400 transition hover:text-zinc-100 disabled:opacity-50"
         >
           <span aria-hidden="true">
             ←
           </span>
+
           Powrót do logowania
         </button>
 
@@ -333,8 +534,9 @@ export default function ResetPasswordForm({
           <p className="mt-3 text-sm leading-6 text-zinc-400">
             Podaj adres e-mail
             przypisany do konta.
-            Wyślemy Ci kod potrzebny
-            do ustawienia nowego
+            Wyślemy Ci kod
+            potrzebny do
+            ustawienia nowego
             hasła.
           </p>
         </div>
@@ -354,9 +556,13 @@ export default function ResetPasswordForm({
               type="email"
               autoComplete="email"
               value={email}
-              onChange={(event) =>
+              onChange={(
+                event,
+              ) =>
                 setEmail(
-                  event.target.value,
+                  event
+                    .target
+                    .value,
                 )
               }
               placeholder="Wpisz swój e-mail"
@@ -400,12 +606,15 @@ export default function ResetPasswordForm({
       <button
         type="button"
         onClick={onBack}
-        disabled={interactionDisabled}
+        disabled={
+          interactionDisabled
+        }
         className="mb-7 inline-flex items-center gap-2 text-sm font-medium text-zinc-400 transition hover:text-zinc-100 disabled:opacity-50"
       >
         <span aria-hidden="true">
           ←
         </span>
+
         Powrót do logowania
       </button>
 
@@ -415,8 +624,9 @@ export default function ResetPasswordForm({
         </h1>
 
         <p className="mt-3 text-sm leading-6 text-zinc-400">
-          Wysłaliśmy 6-cyfrowy kod
-          na adres:
+          Jeżeli konto istnieje,
+          kod został wysłany na
+          adres:
         </p>
 
         <p className="mt-1 break-all font-semibold text-blue-400">
@@ -457,10 +667,16 @@ export default function ResetPasswordForm({
                   : "password"
               }
               autoComplete="new-password"
-              value={newPassword}
-              onChange={(event) =>
+              value={
+                newPassword
+              }
+              onChange={(
+                event,
+              ) =>
                 setNewPassword(
-                  event.target.value,
+                  event
+                    .target
+                    .value,
                 )
               }
               placeholder="Wpisz nowe hasło"
@@ -475,7 +691,9 @@ export default function ResetPasswordForm({
               type="button"
               onClick={() =>
                 setShowPassword(
-                  (current) =>
+                  (
+                    current,
+                  ) =>
                     !current,
                 )
               }
@@ -508,10 +726,16 @@ export default function ResetPasswordForm({
                 : "password"
             }
             autoComplete="new-password"
-            value={repeatedPassword}
-            onChange={(event) =>
+            value={
+              repeatedPassword
+            }
+            onChange={(
+              event,
+            ) =>
               setRepeatedPassword(
-                event.target.value,
+                event
+                  .target
+                  .value,
               )
             }
             placeholder="Powtórz nowe hasło"
@@ -523,10 +747,11 @@ export default function ResetPasswordForm({
         </FormField>
 
         <p className="text-xs leading-5 text-zinc-500">
-          Hasło musi mieć minimum
-          8 znaków oraz zawierać
-          małą literę, wielką literę,
-          cyfrę i znak specjalny.
+          Hasło musi mieć
+          minimum 8 znaków oraz
+          zawierać małą literę,
+          wielką literę, cyfrę
+          i znak specjalny.
         </p>
 
         {error && (
@@ -557,24 +782,34 @@ export default function ResetPasswordForm({
 
       <div className="mt-6 text-center text-sm text-zinc-400">
         Nie dostałeś kodu?{" "}
+
         <button
           type="button"
           onClick={() =>
             void handleResendCode()
           }
-          disabled={interactionDisabled}
+          disabled={
+            resendDisabled
+          }
           className="font-semibold text-blue-400 transition-colors hover:text-blue-300 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {isResending
             ? "Wysyłanie..."
-            : "Wyślij ponownie"}
+            : resendCooldownSeconds >
+                0
+              ? `Wyślij ponownie za ${resendCooldownSeconds} s`
+              : "Wyślij ponownie"}
         </button>
       </div>
 
       <button
         type="button"
-        onClick={handleChangeEmail}
-        disabled={interactionDisabled}
+        onClick={
+          handleChangeEmail
+        }
+        disabled={
+          interactionDisabled
+        }
         className="mt-6 w-full text-center text-sm font-semibold text-zinc-400 transition hover:text-zinc-100 disabled:opacity-50"
       >
         ← Zmień adres e-mail
@@ -586,7 +821,9 @@ export default function ResetPasswordForm({
 function normalizeEmail(
   email: string,
 ): string {
-  return email.trim().toLowerCase();
+  return email
+    .trim()
+    .toLowerCase();
 }
 
 function isPasswordValid(
@@ -594,10 +831,18 @@ function isPasswordValid(
 ): boolean {
   return (
     password.length >= 8 &&
-    /[a-z]/.test(password) &&
-    /[A-Z]/.test(password) &&
-    /\d/.test(password) &&
-    /[^A-Za-z0-9]/.test(password)
+    /[a-z]/.test(
+      password,
+    ) &&
+    /[A-Z]/.test(
+      password,
+    ) &&
+    /\d/.test(
+      password,
+    ) &&
+    /[^A-Za-z0-9]/.test(
+      password,
+    )
   );
 }
 
@@ -614,11 +859,15 @@ function isUserNotFoundError(
 function getRequestErrorMessage(
   error: unknown,
 ): string {
-  if (!(error instanceof Error)) {
+  if (
+    !(error instanceof Error)
+  ) {
     return "Nie udało się wysłać kodu.";
   }
 
-  switch (error.name) {
+  switch (
+    error.name
+  ) {
     case "LimitExceededException":
     case "TooManyRequestsException":
       return "Wykonano zbyt wiele prób. Spróbuj ponownie później.";
@@ -627,7 +876,7 @@ function getRequestErrorMessage(
       return "Nie udało się dostarczyć kodu. Spróbuj ponownie później.";
 
     case "InvalidParameterException":
-      return "Nie można teraz zresetować hasła dla tego konta.";
+      return "Nie można teraz wykonać tej operacji.";
 
     default:
       return "Nie udało się wysłać kodu. Spróbuj ponownie.";
@@ -637,11 +886,15 @@ function getRequestErrorMessage(
 function getConfirmationErrorMessage(
   error: unknown,
 ): string {
-  if (!(error instanceof Error)) {
+  if (
+    !(error instanceof Error)
+  ) {
     return "Nie udało się zmienić hasła.";
   }
 
-  switch (error.name) {
+  switch (
+    error.name
+  ) {
     case "CodeMismatchException":
       return "Podany kod jest nieprawidłowy.";
 

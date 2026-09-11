@@ -8,7 +8,9 @@ import {
   useState,
 } from "react";
 
-import { signUp } from "aws-amplify/auth";
+import {
+  signUp,
+} from "aws-amplify/auth";
 
 import {
   CURRENT_PRIVACY_VERSION,
@@ -24,6 +26,7 @@ import {
 
 type RegisterFormProps = {
   onLoginClick: () => void;
+
   onConfirmationRequired: (
     email: string,
   ) => void;
@@ -31,6 +34,7 @@ type RegisterFormProps = {
 
 type PasswordRequirements = {
   length: boolean;
+  lowercase: boolean;
   uppercase: boolean;
   number: boolean;
   specialCharacter: boolean;
@@ -40,11 +44,15 @@ export default function RegisterForm({
   onLoginClick,
   onConfirmationRequired,
 }: RegisterFormProps) {
-  const [email, setEmail] =
-    useState("");
+  const [
+    email,
+    setEmail,
+  ] = useState("");
 
-  const [password, setPassword] =
-    useState("");
+  const [
+    password,
+    setPassword,
+  ] = useState("");
 
   const [
     repeatedPassword,
@@ -66,19 +74,37 @@ export default function RegisterForm({
     setAcceptedTerms,
   ] = useState(false);
 
-  const [error, setError] =
-    useState("");
+  const [
+    error,
+    setError,
+  ] = useState("");
 
-  const [isLoading, setIsLoading] =
-    useState(false);
+  const [
+    isLoading,
+    setIsLoading,
+  ] = useState(false);
 
   const passwordRequirements =
     useMemo<PasswordRequirements>(
       () => ({
-        length: password.length >= 8,
+        length:
+          password.length >= 8,
+
+        lowercase:
+          /[a-z]/.test(
+            password,
+          ),
+
         uppercase:
-          /[A-Z]/.test(password),
-        number: /\d/.test(password),
+          /[A-Z]/.test(
+            password,
+          ),
+
+        number:
+          /\d/.test(
+            password,
+          ),
+
         specialCharacter:
           /[^A-Za-z0-9]/.test(
             password,
@@ -97,7 +123,8 @@ export default function RegisterForm({
     password === repeatedPassword;
 
   async function handleSubmit(
-    event: FormEvent<HTMLFormElement>,
+    event:
+      FormEvent<HTMLFormElement>,
   ) {
     event.preventDefault();
 
@@ -107,6 +134,7 @@ export default function RegisterForm({
       setError(
         "Hasło nie spełnia wszystkich wymagań.",
       );
+
       return;
     }
 
@@ -114,6 +142,7 @@ export default function RegisterForm({
       setError(
         "Podane hasła nie są identyczne.",
       );
+
       return;
     }
 
@@ -121,6 +150,7 @@ export default function RegisterForm({
       setError(
         "Aby utworzyć konto, zaakceptuj Regulamin i potwierdź zapoznanie się z Polityką prywatności.",
       );
+
       return;
     }
 
@@ -128,43 +158,58 @@ export default function RegisterForm({
 
     try {
       const normalizedEmail =
-        email.trim().toLowerCase();
+        email
+          .trim()
+          .toLowerCase();
 
-      const result = await signUp({
-        username: normalizedEmail,
-        password,
-        options: {
-          userAttributes: {
-            email: normalizedEmail,
+      const result =
+        await signUp({
+          username:
+            normalizedEmail,
 
-            "custom:terms_version":
-              CURRENT_TERMS_VERSION,
+          password,
 
-            "custom:privacy_version":
-              CURRENT_PRIVACY_VERSION,
+          options: {
+            userAttributes: {
+              email:
+                normalizedEmail,
+
+              "custom:terms_version":
+                CURRENT_TERMS_VERSION,
+
+              "custom:privacy_version":
+                CURRENT_PRIVACY_VERSION,
+            },
           },
-        },
-      });
+        });
 
       if (
-        result.nextStep.signUpStep ===
+        result
+          .nextStep
+          .signUpStep ===
         "CONFIRM_SIGN_UP"
       ) {
         onConfirmationRequired(
           normalizedEmail,
         );
+
         return;
       }
 
-      if (result.isSignUpComplete) {
+      if (
+        result.isSignUpComplete
+      ) {
         onLoginClick();
+
         return;
       }
 
       setError(
         "Rejestracja wymaga wykonania dodatkowego kroku.",
       );
-    } catch (caughtError) {
+    } catch (
+      caughtError
+    ) {
       setError(
         getRegisterErrorMessage(
           caughtError,
@@ -183,8 +228,8 @@ export default function RegisterForm({
         </h1>
 
         <p className="mt-2 text-sm leading-6 text-zinc-400">
-          Załóż konto i rozpocznij naukę
-          na platformie.
+          Załóż konto i rozpocznij
+          naukę na platformie.
         </p>
       </div>
 
@@ -202,7 +247,9 @@ export default function RegisterForm({
             autoComplete="email"
             value={email}
             onChange={(event) =>
-              setEmail(event.target.value)
+              setEmail(
+                event.target.value,
+              )
             }
             placeholder="Wpisz swój e-mail"
             required
@@ -218,10 +265,13 @@ export default function RegisterForm({
             id="register-password"
             value={password}
             visible={showPassword}
-            onValueChange={setPassword}
+            onValueChange={
+              setPassword
+            }
             onVisibilityChange={() =>
               setShowPassword(
-                (current) => !current,
+                (current) =>
+                  !current,
               )
             }
             disabled={isLoading}
@@ -241,7 +291,9 @@ export default function RegisterForm({
         >
           <PasswordInput
             id="register-repeat-password"
-            value={repeatedPassword}
+            value={
+              repeatedPassword
+            }
             visible={
               showRepeatedPassword
             }
@@ -250,7 +302,8 @@ export default function RegisterForm({
             }
             onVisibilityChange={() =>
               setShowRepeatedPassword(
-                (current) => !current,
+                (current) =>
+                  !current,
               )
             }
             disabled={isLoading}
@@ -280,6 +333,13 @@ export default function RegisterForm({
 
           <PasswordRequirement
             fulfilled={
+              passwordRequirements.lowercase
+            }
+            label="Jedna mała litera"
+          />
+
+          <PasswordRequirement
+            fulfilled={
               passwordRequirements.uppercase
             }
             label="Jedna wielka litera"
@@ -305,14 +365,22 @@ export default function RegisterForm({
             <input
               id="register-terms"
               type="checkbox"
-              checked={acceptedTerms}
-              onChange={(event) =>
+              checked={
+                acceptedTerms
+              }
+              onChange={(
+                event,
+              ) =>
                 setAcceptedTerms(
-                  event.target.checked,
+                  event
+                    .target
+                    .checked,
                 )
               }
               required
-              disabled={isLoading}
+              disabled={
+                isLoading
+              }
               className="mt-1 h-4 w-4 shrink-0 cursor-pointer rounded border-zinc-700 bg-zinc-900 accent-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
             />
 
@@ -328,14 +396,15 @@ export default function RegisterForm({
               >
                 Regulamin
               </Link>{" "}
-              oraz potwierdzam zapoznanie
-              się z{" "}
+              oraz potwierdzam
+              zapoznanie się z{" "}
               <Link
                 href="/privacyPolicy"
                 target="_blank"
                 className="font-medium text-blue-400 transition-colors hover:text-blue-300 hover:underline"
               >
-                Polityką prywatności
+                Polityką
+                prywatności
                 i cookies
               </Link>
               .
@@ -364,7 +433,9 @@ export default function RegisterForm({
         Masz już konto?{" "}
         <button
           type="button"
-          onClick={onLoginClick}
+          onClick={
+            onLoginClick
+          }
           disabled={isLoading}
           className="font-semibold text-blue-400 transition-colors hover:text-blue-300 disabled:opacity-50"
         >
@@ -381,12 +452,19 @@ type PasswordInputProps = {
   visible: boolean;
   placeholder: string;
   disabled: boolean;
+
   onValueChange: (
     value: string,
   ) => void;
-  onVisibilityChange: () => void;
-  "aria-invalid"?: boolean;
-  "aria-describedby"?: string;
+
+  onVisibilityChange:
+    () => void;
+
+  "aria-invalid"?:
+    boolean;
+
+  "aria-describedby"?:
+    string;
 };
 
 function PasswordInput({
@@ -404,7 +482,9 @@ function PasswordInput({
       <Input
         id={id}
         type={
-          visible ? "text" : "password"
+          visible
+            ? "text"
+            : "password"
         }
         autoComplete="new-password"
         value={value}
@@ -413,7 +493,9 @@ function PasswordInput({
             event.target.value,
           )
         }
-        placeholder={placeholder}
+        placeholder={
+          placeholder
+        }
         required
         disabled={disabled}
         className="pr-20"
@@ -422,7 +504,9 @@ function PasswordInput({
 
       <button
         type="button"
-        onClick={onVisibilityChange}
+        onClick={
+          onVisibilityChange
+        }
         disabled={disabled}
         className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-semibold text-zinc-400 transition-colors hover:text-zinc-100 disabled:opacity-50"
         aria-label={
@@ -431,7 +515,9 @@ function PasswordInput({
             : "Pokaż hasło"
         }
       >
-        {visible ? "Ukryj" : "Pokaż"}
+        {visible
+          ? "Ukryj"
+          : "Pokaż"}
       </button>
     </div>
   );
@@ -448,6 +534,7 @@ function PasswordRequirement({
     <div
       className={[
         "flex items-center gap-2",
+
         fulfilled
           ? "text-emerald-400"
           : "text-zinc-500",
@@ -457,15 +544,20 @@ function PasswordRequirement({
         aria-hidden="true"
         className={[
           "flex h-4 w-4 items-center justify-center rounded-full border text-[10px]",
+
           fulfilled
             ? "border-emerald-500 bg-emerald-500/10"
             : "border-zinc-700",
         ].join(" ")}
       >
-        {fulfilled ? "✓" : ""}
+        {fulfilled
+          ? "✓"
+          : ""}
       </span>
 
-      <span>{label}</span>
+      <span>
+        {label}
+      </span>
     </div>
   );
 }
@@ -473,13 +565,21 @@ function PasswordRequirement({
 function getRegisterErrorMessage(
   error: unknown,
 ): string {
-  if (!(error instanceof Error)) {
+  if (
+    !(error instanceof Error)
+  ) {
     return "Nie udało się utworzyć konta.";
   }
 
-  switch (error.name) {
+  switch (
+    error.name
+  ) {
+    /*
+     * Do not reveal whether the email address
+     * already belongs to an existing account.
+     */
     case "UsernameExistsException":
-      return "Konto z tym adresem e-mail już istnieje.";
+      return "Nie udało się utworzyć konta. Jeżeli masz już konto, spróbuj się zalogować lub zresetować hasło.";
 
     case "InvalidPasswordException":
       return "Hasło nie spełnia wymagań bezpieczeństwa.";
@@ -488,6 +588,7 @@ function getRegisterErrorMessage(
       return "Podane dane są nieprawidłowe.";
 
     case "LimitExceededException":
+    case "TooManyRequestsException":
       return "Wykonano zbyt wiele prób. Spróbuj ponownie później.";
 
     default:
