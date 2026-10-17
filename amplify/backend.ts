@@ -48,6 +48,10 @@ import {
 } from "./data/create-checkout-session/resource";
 
 import {
+  deleteAdminCourse,
+} from "./data/delete-admin-course/resource";
+
+import {
   AttributeType,
   BillingMode,
   ProjectionType,
@@ -95,12 +99,21 @@ import {
   storage,
 } from "./storage/resource";
 
+/*
+ * Backend composition root.
+ *
+ * This file wires Amplify resources together and adds infrastructure-level
+ * permissions/configuration. Runtime business logic belongs in handlers, not
+ * here. Keeping cross-stack references directional is critical because CDK /
+ * CloudFormation cannot deploy dependency cycles between nested stacks.
+ */
 const backend = defineBackend({
   auth,
   data,
   storage,
   acceptCurrentLegal,
   createCheckoutSession,
+  deleteAdminCourse,
   publicCatalog,
   publicCourseOutline,
   premiumLessonContent,
@@ -181,6 +194,12 @@ const moduleCourseIndexName =
 const lessonModuleIndexName =
   "gsi-Module.lessons";
 
+const lessonNoteLessonIndexName =
+  "gsi-Lesson.notes";
+
+const lessonTaskLessonIndexName =
+  "gsi-Lesson.tasks";
+
 /*
  * Legal acceptance writer.
  */
@@ -194,6 +213,111 @@ legalAcceptanceTable.grant(
 backend.acceptCurrentLegal.addEnvironment(
   "LEGAL_ACCEPTANCE_TABLE_NAME",
   legalAcceptanceTable.tableName,
+);
+
+/*
+ * Safe ADMIN-only course deletion.
+ *
+ * The Lambda can:
+ * - read and delete the root Course,
+ * - Query only the four relationship indexes needed for traversal,
+ * - batch-delete only from Module, Lesson, LessonNote and LessonTask.
+ *
+ * It has no Scan, PutItem, UpdateItem, billing or auth permissions.
+ * S3 list/delete access is defined in storage/resource.ts so the storage
+ * stack owns Storage -> Function permissions without creating a reverse
+ * Data -> Storage CloudFormation dependency.
+ */
+courseTable.grant(
+  backend
+    .deleteAdminCourse
+    .resources
+    .lambda,
+  "dynamodb:GetItem",
+  "dynamodb:DeleteItem",
+);
+
+backend
+  .deleteAdminCourse
+  .resources
+  .lambda
+  .addToRolePolicy(
+    new PolicyStatement({
+      actions: [
+        "dynamodb:Query",
+      ],
+
+      resources: [
+        `${moduleTable.tableArn}/index/${moduleCourseIndexName}`,
+        `${lessonTable.tableArn}/index/${lessonModuleIndexName}`,
+        `${lessonNoteTable.tableArn}/index/${lessonNoteLessonIndexName}`,
+        `${lessonTaskTable.tableArn}/index/${lessonTaskLessonIndexName}`,
+      ],
+    }),
+  );
+
+backend
+  .deleteAdminCourse
+  .resources
+  .lambda
+  .addToRolePolicy(
+    new PolicyStatement({
+      actions: [
+        "dynamodb:BatchWriteItem",
+      ],
+
+      resources: [
+        moduleTable.tableArn,
+        lessonTable.tableArn,
+        lessonNoteTable.tableArn,
+        lessonTaskTable.tableArn,
+      ],
+    }),
+  );
+
+backend.deleteAdminCourse.addEnvironment(
+  "COURSE_TABLE_NAME",
+  courseTable.tableName,
+);
+
+backend.deleteAdminCourse.addEnvironment(
+  "MODULE_TABLE_NAME",
+  moduleTable.tableName,
+);
+
+backend.deleteAdminCourse.addEnvironment(
+  "LESSON_TABLE_NAME",
+  lessonTable.tableName,
+);
+
+backend.deleteAdminCourse.addEnvironment(
+  "LESSON_NOTE_TABLE_NAME",
+  lessonNoteTable.tableName,
+);
+
+backend.deleteAdminCourse.addEnvironment(
+  "LESSON_TASK_TABLE_NAME",
+  lessonTaskTable.tableName,
+);
+
+backend.deleteAdminCourse.addEnvironment(
+  "MODULE_COURSE_INDEX_NAME",
+  moduleCourseIndexName,
+);
+
+backend.deleteAdminCourse.addEnvironment(
+  "LESSON_MODULE_INDEX_NAME",
+  lessonModuleIndexName,
+);
+
+backend.deleteAdminCourse.addEnvironment(
+  "LESSON_NOTE_LESSON_INDEX_NAME",
+  lessonNoteLessonIndexName,
+);
+
+backend.deleteAdminCourse.addEnvironment(
+  "LESSON_TASK_LESSON_INDEX_NAME",
+  lessonTaskLessonIndexName,
 );
 
 /*
@@ -580,6 +704,39 @@ const checkoutRateLimitTable =
         "expiresAt",
     },
   );
+  
+/*
+ * Immutable server-side snapshot of one Checkout attempt.
+ *
+ * The table records the trusted billing contract and the
+ * checkout-specific legal declarations that existed BEFORE the
+ * Stripe Checkout Session was created.
+ *
+ * Browser clients never receive direct DynamoDB/AppSync CRUD access
+ * to this table.
+ */
+const checkoutAttemptTable =
+  new Table(
+    billingStack,
+    "CheckoutAttemptTable",
+    {
+      partitionKey: {
+        name:
+          "checkoutAttemptId",
+
+        type:
+          AttributeType.STRING,
+      },
+
+      billingMode:
+        BillingMode.PAY_PER_REQUEST,
+
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled:
+          true,
+      },
+    },
+  );
 
 billingCustomerTable.addGlobalSecondaryIndex({
   indexName:
@@ -793,6 +950,25 @@ legalAcceptanceTable.grant(
   "dynamodb:GetItem",
 );
 
+/*
+ * Checkout contract / consent snapshot.
+ *
+ * The checkout creator may only create a new immutable attempt.
+ * It cannot read, update, scan, query or delete historical attempts.
+ */
+checkoutAttemptTable.grant(
+  backend
+    .createCheckoutSession
+    .resources
+    .lambda,
+  "dynamodb:PutItem",
+);
+
+backend.createCheckoutSession.addEnvironment(
+  "CHECKOUT_ATTEMPT_TABLE_NAME",
+  checkoutAttemptTable.tableName,
+);
+
 billingCustomerTable.grant(
   backend
     .createCheckoutSession
@@ -935,6 +1111,9 @@ new CfnOutput(
  * BillingCustomer:
  *   GetItem only
  *
+ * CheckoutAttempt:
+ *   GetItem + UpdateItem
+ *
  * StripeEvent:
  *   GetItem + PutItem
  *
@@ -943,6 +1122,11 @@ new CfnOutput(
  *
  * Entitlement:
  *   GetItem + UpdateItem
+ *
+ * The webhook can finalize a trusted CheckoutAttempt after Stripe has
+ * cryptographically authenticated the payment event. It cannot create or
+ * delete CheckoutAttempt records and it has no course, S3 or Cognito admin
+ * permissions.
  */
 billingCustomerTable.grant(
   backend
@@ -950,6 +1134,15 @@ billingCustomerTable.grant(
     .resources
     .lambda,
   "dynamodb:GetItem",
+);
+
+checkoutAttemptTable.grant(
+  backend
+    .stripeWebhook
+    .resources
+    .lambda,
+  "dynamodb:GetItem",
+  "dynamodb:UpdateItem",
 );
 
 stripeEventTable.grant(
@@ -982,6 +1175,11 @@ entitlementTable.grant(
 backend.stripeWebhook.addEnvironment(
   "BILLING_CUSTOMER_TABLE_NAME",
   billingCustomerTable.tableName,
+);
+
+backend.stripeWebhook.addEnvironment(
+  "CHECKOUT_ATTEMPT_TABLE_NAME",
+  checkoutAttemptTable.tableName,
 );
 
 backend.stripeWebhook.addEnvironment(
@@ -1157,6 +1355,62 @@ const stripeWebhookErrorsAlarm =
   );
 
 stripeWebhookErrorsAlarm
+  .addAlarmAction(
+    operationalAlertsAction,
+  );
+
+/*
+ * Stripe webhook HTTP 5xx responses.
+ *
+ * The webhook intentionally returns HTTP 500 for processing failures so
+ * Stripe retries them. A handled 500 response does not increment the Lambda
+ * Errors metric, therefore API Gateway 5xx must be monitored separately.
+ */
+const stripeWebhook5xxMetric =
+  new Metric({
+    namespace:
+      "AWS/ApiGateway",
+
+    metricName:
+      "5xx",
+
+    dimensionsMap: {
+      ApiId:
+        stripeWebhookApi.apiId,
+    },
+
+    statistic:
+      "Sum",
+
+    period:
+      Duration.minutes(
+        5,
+      ),
+  });
+
+const stripeWebhook5xxAlarm =
+  new Alarm(
+    monitoringStack,
+    "StripeWebhook5xxAlarm",
+    {
+      metric:
+        stripeWebhook5xxMetric,
+
+      threshold: 1,
+
+      evaluationPeriods: 1,
+
+      datapointsToAlarm: 1,
+
+      treatMissingData:
+        TreatMissingData.NOT_BREACHING,
+
+      alarmDescription:
+        "Stripe webhook HTTP API returned at least one 5xx response within 5 minutes.",
+    },
+  );
+
+stripeWebhook5xxAlarm
   .addAlarmAction(
     operationalAlertsAction,
   );

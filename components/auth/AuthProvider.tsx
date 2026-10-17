@@ -7,6 +7,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
@@ -81,8 +82,20 @@ export default function AuthProvider({
       null,
     );
 
+  const authRequestIdRef = useRef(0);
+
+  const isLoggingOutRef =
+    useRef(false);
+
   const refreshAuth =
     useCallback(async () => {
+      if (isLoggingOutRef.current) {
+        return;
+      }
+
+      const requestId =
+        ++authRequestIdRef.current;
+
       setIsLoading(true);
 
       try {
@@ -93,6 +106,14 @@ export default function AuthProvider({
           getCurrentUser(),
           fetchAuthSession(),
         ]);
+
+        if (
+          isLoggingOutRef.current ||
+          requestId !==
+            authRequestIdRef.current
+        ) {
+          return;
+        }
 
         const groups = readGroups(
           session.tokens?.accessToken.payload[
@@ -114,11 +135,25 @@ export default function AuthProvider({
               : null,
         );
       } catch {
+        if (
+          isLoggingOutRef.current ||
+          requestId !==
+            authRequestIdRef.current
+        ) {
+          return;
+        }
+
         setUser(null);
         setIsAdmin(false);
         setLegalVerification(null);
       } finally {
-        setIsLoading(false);
+        if (
+          !isLoggingOutRef.current &&
+          requestId ===
+            authRequestIdRef.current
+        ) {
+          setIsLoading(false);
+        }
       }
     }, []);
 
@@ -128,11 +163,26 @@ export default function AuthProvider({
 
   const logout =
     useCallback(async () => {
-      await signOut();
+      if (isLoggingOutRef.current) {
+        return;
+      }
 
-      setUser(null);
-      setIsAdmin(false);
-      setLegalVerification(null);
+      isLoggingOutRef.current = true;
+
+      ++authRequestIdRef.current;
+
+      setIsLoading(true);
+
+      try {
+        await signOut();
+
+        setUser(null);
+        setIsAdmin(false);
+        setLegalVerification(null);
+      } finally {
+        isLoggingOutRef.current = false;
+        setIsLoading(false);
+      }
     }, []);
 
   const markCurrentLegalVerified =

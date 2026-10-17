@@ -18,6 +18,10 @@ import {
 } from "./create-checkout-session/resource";
 
 import {
+  deleteAdminCourse,
+} from "./delete-admin-course/resource";
+
+import {
   premiumLessonAssetUrl,
 } from "./premium-lesson-asset-url/resource";
 
@@ -216,6 +220,27 @@ const schema = a
       }),
 
     /*
+     * Result returned by the safe ADMIN-only course deletion flow.
+     */
+    DeleteAdminCourseResult:
+      a.customType({
+        status:
+          a.string().required(),
+
+        deletedModules:
+          a.integer().required(),
+
+        deletedLessons:
+          a.integer().required(),
+
+        deletedNotes:
+          a.integer().required(),
+
+        deletedTasks:
+          a.integer().required(),
+      }),
+
+    /*
      * Premium lesson note DTO.
      */
     PremiumLessonNote: a.customType({
@@ -324,31 +349,74 @@ const schema = a
         a.string(),
     }),
 
+/*
+ * Creates a Stripe-hosted Checkout Session for an authenticated
+ * user.
+ *
+ * The browser selects only a trusted plan code and explicitly
+ * confirms the checkout-specific digital-content declarations.
+ *
+ * Price, identity, access duration, legal versions, timestamps and
+ * the billing contract are resolved exclusively by the backend.
+ */
+createCheckoutSession: a
+  .mutation()
+  .arguments({
+    planCode:
+      a.string().required(),
+
+    immediateDeliveryConsent:
+      a.boolean().required(),
+
+    withdrawalRightLossAcknowledged:
+      a.boolean().required(),
+  })
+  .returns(
+    a.ref(
+      "CreateCheckoutSessionResult",
+    ),
+  )
+  .authorization((allow) => [
+    allow.authenticated(),
+  ])
+  .handler(
+    a.handler.function(
+      createCheckoutSession,
+    ),
+  ),
+
     /*
-     * Creates a Stripe-hosted Checkout Session for an authenticated
-     * user.
+     * Safely deletes one draft course and all DynamoDB descendants.
      *
-     * The browser selects only a trusted plan code. Price, user
-     * identity, access duration, and redirect URLs are resolved by
-     * the backend.
+     * The caller must be in the ADMIN Cognito group. The Lambda
+     * repeats the ADMIN check as defense in depth.
+     *
+     * confirmationSlug is validated against the stored course slug
+     * before any destructive operation starts.
      */
-    createCheckoutSession: a
-      .query()
+    deleteAdminCourse: a
+      .mutation()
       .arguments({
-        planCode:
+        courseId:
+          a.id().required(),
+
+        confirmationSlug:
           a.string().required(),
       })
       .returns(
         a.ref(
-          "CreateCheckoutSessionResult",
+          "DeleteAdminCourseResult",
         ),
       )
       .authorization((allow) => [
-        allow.authenticated(),
+        allow
+          .group(
+            "ADMIN",
+          ),
       ])
       .handler(
         a.handler.function(
-          createCheckoutSession,
+          deleteAdminCourse,
         ),
       ),
 
@@ -629,9 +697,15 @@ const schema = a
       ])
 
       .authorization((allow) => [
-        allow.group(
-          "ADMIN",
-        ),
+        allow
+          .group(
+            "ADMIN",
+          )
+          .to([
+            "create",
+            "read",
+            "update",
+          ]),
       ]),
 
     /*
@@ -672,9 +746,15 @@ const schema = a
           ),
       })
       .authorization((allow) => [
-        allow.group(
-          "ADMIN",
-        ),
+        allow
+          .group(
+            "ADMIN",
+          )
+          .to([
+            "create",
+            "read",
+            "update",
+          ]),
       ]),
 
     /*
@@ -733,9 +813,15 @@ const schema = a
           ),
       })
       .authorization((allow) => [
-        allow.group(
-          "ADMIN",
-        ),
+        allow
+          .group(
+            "ADMIN",
+          )
+          .to([
+            "create",
+            "read",
+            "update",
+          ]),
       ]),
 
     /*

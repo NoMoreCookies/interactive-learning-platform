@@ -12,6 +12,7 @@ import {
 
 import CourseModulesList from "@/components/admin/course/CourseModulesList";
 import CourseSettingsForm from "@/components/admin/course/CourseSettingsForm";
+import CourseThumbnailUploader from "@/components/admin/course/CourseThumbnailUploader";
 import ModuleCreateForm, {
   type CreateModuleInput,
 } from "@/components/admin/course/ModuleCreateForm";
@@ -28,6 +29,7 @@ import {
   getAdminCourse,
   getAdminModulesByCourseId,
   updateAdminCourse,
+  updateAdminCourseThumbnailPath,
 } from "@/lib/services/admin-service";
 
 import {
@@ -50,17 +52,13 @@ export default function AdminCoursePage() {
   const [modules, setModules] =
     useState<AdminCourseModule[]>([]);
 
-  const [
-    statusMessage,
-    setStatusMessage,
-  ] = useState("");
+  const [statusMessage, setStatusMessage] =
+    useState("");
 
-  const [
-    statusTone,
-    setStatusTone,
-  ] = useState<
-    "info" | "success" | "error"
-  >("info");
+  const [statusTone, setStatusTone] =
+    useState<"info" | "success" | "error">(
+      "info",
+    );
 
   const [isLoading, setIsLoading] =
     useState(true);
@@ -208,6 +206,36 @@ export default function AdminCoursePage() {
     }
   }
 
+  async function handleThumbnailPathSaved(
+    path: string | null,
+  ) {
+    if (!course) {
+      throw new Error(
+        "Nie znaleziono kursu.",
+      );
+    }
+
+    await updateAdminCourseThumbnailPath({
+      courseId: course.id,
+      thumbnailPath: path,
+    });
+  }
+
+  function handleThumbnailChanged(
+    path: string | null,
+  ) {
+    setCourse((currentCourse) => {
+      if (!currentCourse) {
+        return currentCourse;
+      }
+
+      return {
+        ...currentCourse,
+        thumbnailPath: path,
+      };
+    });
+  }
+
   if (isLoading) {
     return (
       <main className="text-zinc-400">
@@ -274,6 +302,17 @@ export default function AdminCoursePage() {
             isSaving={isSaving}
             onCourseChange={setCourse}
             onSubmit={handleSaveCourse}
+          />
+
+          <CourseThumbnailUploader
+            courseId={course.id}
+            currentPath={course.thumbnailPath}
+            onPathSaved={
+              handleThumbnailPathSaved
+            }
+            onChanged={
+              handleThumbnailChanged
+            }
           />
 
           <CourseModulesList

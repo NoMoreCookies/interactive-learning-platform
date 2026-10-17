@@ -1,4 +1,8 @@
 import {
+  randomUUID,
+} from "node:crypto";
+
+import {
   DynamoDBClient,
   GetItemCommand,
   PutItemCommand,
@@ -27,12 +31,22 @@ import {
 } from "../../shared/billing-plans";
 
 import {
+  CHECKOUT_CONSENT_VERSION,
+} from "../../shared/checkout-consent";
+
+import {
   CURRENT_PRIVACY_VERSION,
   CURRENT_TERMS_VERSION,
 } from "../../shared/legal-versions";
 
 type CreateCheckoutSessionArguments = {
   planCode: string;
+
+  immediateDeliveryConsent:
+    boolean;
+
+  withdrawalRightLossAcknowledged:
+    boolean;
 };
 
 type CreateCheckoutSessionResult =
@@ -50,7 +64,8 @@ type CreateCheckoutSessionResult =
 class CheckoutClientError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = "CheckoutClientError";
+    this.name =
+      "CheckoutClientError";
   }
 }
 
@@ -63,17 +78,51 @@ const stripe =
   );
 
 /*
- * A legitimate user should never need to create multiple Stripe
- * Checkout Sessions within such a short time window.
+ * CHECKOUT_ATTEMPT_TABLE_NAME is injected dynamically from backend.ts
+ * with backend.createCheckoutSession.addEnvironment(...).
+ *
+ * Amplify's generated $amplify/env typings do not include this
+ * cross-resource variable in the current toolchain, so we read this one
+ * value directly from process.env and validate it explicitly.
+ *
+ * Missing configuration fails closed during Lambda initialization.
+ */
+function requireRuntimeEnvironmentVariable(
+  name: string,
+): string {
+  const value =
+    process.env[name]?.trim();
+
+  if (!value) {
+    throw new Error(
+      `Missing required runtime environment variable: ${name}.`,
+    );
+  }
+
+  return value;
+}
+
+const checkoutAttemptTableName =
+  requireRuntimeEnvironmentVariable(
+    "CHECKOUT_ATTEMPT_TABLE_NAME",
+  );
+
+/*
+ * A legitimate user should not need to create multiple Stripe
+ * Checkout Sessions within such a short period.
+ *
+ * This primarily protects expensive downstream operations.
+ * It is not a complete pre-Lambda DoS protection mechanism.
  */
 const CHECKOUT_COOLDOWN_SECONDS =
   20;
 
 /*
- * Rate-limit records are temporary operational data.
+ * DynamoDB TTL is used only for eventual cleanup of rate-limit
+ * records.
  *
- * TTL is only responsible for eventual cleanup. Security does not
- * depend on DynamoDB deleting the record at an exact time.
+ * Security never depends on DynamoDB removing the item at a precise
+ * time.
  */
 const RATE_LIMIT_TTL_SECONDS =
   60 * 60;
@@ -99,8 +148,7 @@ function getAuthenticatedUserId(
     ).sub;
 
   if (
-    typeof sub !==
-      "string" ||
+    typeof sub !== "string" ||
     !sub.trim()
   ) {
     throw new CheckoutClientError(
@@ -109,6 +157,35 @@ function getAuthenticatedUserId(
   }
 
   return sub.trim();
+}
+
+function assertCheckoutConsents(
+  immediateDeliveryConsent:
+    unknown,
+  withdrawalRightLossAcknowledged:
+    unknown,
+): void {
+  /*
+   * Both declarations must be explicitly true.
+   *
+   * Truthy values such as:
+   *
+   * "true"
+   * 1
+   * {}
+   *
+   * are deliberately rejected.
+   */
+  if (
+    immediateDeliveryConsent !==
+      true ||
+    withdrawalRightLossAcknowledged !==
+      true
+  ) {
+    throw new CheckoutClientError(
+      "Aby uzyskać natychmiastowy dostęp, musisz potwierdzić wymagane oświadczenia dotyczące dostarczania treści cyfrowych.",
+    );
+  }
 }
 
 function getStripePriceId(
@@ -140,8 +217,7 @@ function getAppBaseUrl(): string {
   }
 
   const isLocalDevelopment =
-    url.protocol ===
-      "http:" &&
+    url.protocol === "http:" &&
     (
       url.hostname ===
         "localhost" ||
@@ -150,8 +226,7 @@ function getAppBaseUrl(): string {
     );
 
   if (
-    url.protocol !==
-      "https:" &&
+    url.protocol !== "https:" &&
     !isLocalDevelopment
   ) {
     throw new Error(
@@ -159,13 +234,26 @@ function getAppBaseUrl(): string {
     );
   }
 
+  /*
+   * Only an application origin is allowed.
+   *
+   * Examples accepted:
+   *
+   * https://poprostumatma.pl
+   * http://localhost:3000
+   *
+   * Examples rejected:
+   *
+   * https://example.com/path
+   * https://example.com?x=1
+   * https://user:pass@example.com
+   */
   if (
     url.username ||
     url.password ||
     url.search ||
     url.hash ||
-    url.pathname !==
-      "/"
+    url.pathname !== "/"
   ) {
     throw new Error(
       "APP_BASE_URL must contain only the application origin.",
@@ -204,8 +292,8 @@ async function assertCurrentLegalAcceptance(
         /*
          * Checkout is security-sensitive.
          *
-         * Strong consistency ensures that a legal acceptance that
-         * has just been written is immediately visible here.
+         * Strong consistency avoids rejecting a valid purchase
+         * immediately after the current legal acceptance was stored.
          */
         ConsistentRead:
           true,
@@ -288,16 +376,11 @@ function isConditionalCheckFailure(
  * Atomically consumes one Checkout attempt for the authenticated
  * user.
  *
- * Return value:
- *
  * null:
  *   Checkout may continue.
  *
  * number:
  *   Remaining cooldown in seconds.
- *
- * The condition and the write are performed atomically by DynamoDB,
- * preventing concurrent requests from both passing the limiter.
  */
 async function consumeCheckoutRateLimit(
   userId: string,
@@ -328,12 +411,6 @@ async function consumeCheckoutRateLimit(
           },
         },
 
-        /*
-         * Allow the request only when:
-         *
-         * - no limiter exists yet, or
-         * - the previous cooldown has expired.
-         */
         ConditionExpression:
           "attribute_not_exists(nextAllowedAt) OR nextAllowedAt <= :now",
 
@@ -360,13 +437,6 @@ async function consumeCheckoutRateLimit(
           },
         },
 
-        /*
-         * When the conditional write fails, DynamoDB returns the
-         * previous limiter record as part of the exception.
-         *
-         * This lets us calculate retryAfterSeconds without issuing
-         * another GetItem request.
-         */
         ReturnValuesOnConditionCheckFailure:
           "ALL_OLD",
       }),
@@ -406,13 +476,6 @@ async function consumeCheckoutRateLimit(
           )
         : Number.NaN;
 
-    /*
-     * If DynamoDB unexpectedly does not return a valid timestamp,
-     * fail conservatively from the UX perspective.
-     *
-     * Backend security still remains enforced by the conditional
-     * write itself.
-     */
     if (
       !Number.isFinite(
         storedNextAllowedAt,
@@ -444,17 +507,9 @@ async function getOrCreateStripeCustomer(
   }
 
   /*
-   * We deliberately do not copy the Cognito email here.
+   * Cognito sub is the stable application identity.
    *
-   * Stripe Checkout may collect billing email itself.
-   *
-   * The stable application relationship is:
-   *
-   * Cognito sub -> Stripe Customer
-   *
-   * and not:
-   *
-   * email -> Stripe Customer
+   * Email is deliberately not used as the billing identity.
    */
   const stripeCustomer =
     await stripe.customers.create(
@@ -465,10 +520,6 @@ async function getOrCreateStripeCustomer(
         },
       },
       {
-        /*
-         * Protect retries from creating multiple Stripe Customers
-         * for the same application user.
-         */
         idempotencyKey:
           `poprostumatma:customer:${userId}`,
       },
@@ -504,10 +555,6 @@ async function getOrCreateStripeCustomer(
           },
         },
 
-        /*
-         * Prevent concurrent requests from overwriting an existing
-         * Cognito user -> Stripe Customer mapping.
-         */
         ConditionExpression:
           "attribute_not_exists(userId)",
       }),
@@ -524,8 +571,8 @@ async function getOrCreateStripeCustomer(
     }
 
     /*
-     * Another invocation created the authoritative mapping first.
-     * Read and use that mapping rather than overwriting it.
+     * Another concurrent invocation created the authoritative
+     * mapping first.
      */
     const concurrentCustomerId =
       await getStoredStripeCustomerId(
@@ -573,12 +620,164 @@ async function assertStripePriceMatchesPlan(
   }
 }
 
+/*
+ * Creates the authoritative server-side snapshot of the purchase
+ * contract and checkout-specific legal declarations.
+ *
+ * The browser cannot supply:
+ *
+ * - userId,
+ * - timestamp,
+ * - price,
+ * - currency,
+ * - access duration,
+ * - Stripe Price ID,
+ * - legal document versions,
+ * - billing contract version,
+ * - consent version.
+ *
+ * Those values are resolved exclusively by trusted backend code.
+ */
+async function createCheckoutAttempt(
+  userId: string,
+  stripeCustomerId: string,
+  planCode: BillingPlanCode,
+  stripePriceId: string,
+): Promise<string> {
+  const checkoutAttemptId =
+    randomUUID();
+
+  const plan =
+    BILLING_PLANS[
+      planCode
+    ];
+
+  const timestamp =
+    new Date()
+      .toISOString();
+
+  await dynamoDb.send(
+    new PutItemCommand({
+      TableName:
+        checkoutAttemptTableName,
+
+      Item: {
+        checkoutAttemptId: {
+          S:
+            checkoutAttemptId,
+        },
+
+        userId: {
+          S:
+            userId,
+        },
+
+        stripeCustomerId: {
+          S:
+            stripeCustomerId,
+        },
+
+        planCode: {
+          S:
+            planCode,
+        },
+
+        billingContractVersion: {
+          S:
+            BILLING_CONTRACT_VERSION,
+        },
+
+        stripePriceId: {
+          S:
+            stripePriceId,
+        },
+
+        amountTotal: {
+          N: String(
+            plan.unitAmount,
+          ),
+        },
+
+        currency: {
+          S:
+            plan.currency,
+        },
+
+        checkoutMode: {
+          S:
+            plan.checkoutMode,
+        },
+
+        accessDays: {
+          N: String(
+            plan.accessDays,
+          ),
+        },
+
+        termsVersion: {
+          S:
+            CURRENT_TERMS_VERSION,
+        },
+
+        privacyVersion: {
+          S:
+            CURRENT_PRIVACY_VERSION,
+        },
+
+        checkoutConsentVersion: {
+          S:
+            CHECKOUT_CONSENT_VERSION,
+        },
+
+        immediateDeliveryConsent: {
+          BOOL:
+            true,
+        },
+
+        withdrawalRightLossAcknowledged:
+          {
+            BOOL:
+              true,
+          },
+
+        consentedAt: {
+          S:
+            timestamp,
+        },
+
+        status: {
+          S:
+            "CREATED",
+        },
+
+        createdAt: {
+          S:
+            timestamp,
+        },
+
+        updatedAt: {
+          S:
+            timestamp,
+        },
+      },
+
+      /*
+       * UUID collisions are extraordinarily unlikely, but the
+       * database invariant is still explicit.
+       */
+      ConditionExpression:
+        "attribute_not_exists(checkoutAttemptId)",
+    }),
+  );
+
+  return checkoutAttemptId;
+}
+
 function getSafeErrorDetails(
   error: unknown,
 ): Record<string, string> {
   if (
-    typeof error !==
-      "object" ||
+    typeof error !== "object" ||
     error === null
   ) {
     return {
@@ -637,8 +836,6 @@ export const handler:
           ?.planCode;
 
       if (
-        typeof rawPlanCode !==
-          "string" ||
         !isBillingPlanCode(
           rawPlanCode,
         )
@@ -652,10 +849,21 @@ export const handler:
         rawPlanCode;
 
       /*
-       * User identity is resolved exclusively from the authenticated
-       * Cognito identity supplied by AppSync.
-       *
-       * The caller cannot choose another user's ID.
+       * Checkout-specific declarations are validated before the
+       * rate-limit record is consumed, so a normal user does not
+       * receive a cooldown merely for forgetting a required checkbox.
+       */
+      assertCheckoutConsents(
+        event.arguments
+          ?.immediateDeliveryConsent,
+
+        event.arguments
+          ?.withdrawalRightLossAcknowledged,
+      );
+
+      /*
+       * The application user is derived solely from the trusted
+       * AppSync/Cognito identity.
        */
       const userId =
         getAuthenticatedUserId(
@@ -663,8 +871,7 @@ export const handler:
         );
 
       /*
-       * Stop repeated Checkout requests before performing the more
-       * expensive billing and Stripe operations.
+       * Prevent repeated expensive checkout operations.
        */
       const retryAfterSeconds =
         await consumeCheckoutRateLimit(
@@ -687,8 +894,8 @@ export const handler:
       }
 
       /*
-       * Billing is blocked when the authenticated user has not
-       * accepted the current legal document versions.
+       * Checkout is blocked unless the authenticated user has
+       * accepted the current Terms and Privacy Policy versions.
        */
       await assertCurrentLegalAcceptance(
         userId,
@@ -706,8 +913,8 @@ export const handler:
       }
 
       /*
-       * Fail closed when Stripe Dashboard configuration does not
-       * match the trusted server-side billing plan definition.
+       * Protect against a wrong Stripe Dashboard / secret
+       * configuration.
        */
       await assertStripePriceMatchesPlan(
         planCode,
@@ -722,7 +929,24 @@ export const handler:
       const appBaseUrl =
         getAppBaseUrl();
 
+      /*
+       * Persist the authoritative purchase/consent snapshot BEFORE a
+       * Stripe Checkout Session is created.
+       *
+       * This guarantees that every session created by this backend
+       * refers to a pre-existing trusted CheckoutAttempt.
+       */
+      const checkoutAttemptId =
+        await createCheckoutAttempt(
+          userId,
+          stripeCustomerId,
+          planCode,
+          stripePriceId,
+        );
+
       const metadata = {
+        checkoutAttemptId,
+
         appUserId:
           userId,
 
@@ -738,49 +962,63 @@ export const handler:
 
         privacyVersion:
           CURRENT_PRIVACY_VERSION,
+
+        checkoutConsentVersion:
+          CHECKOUT_CONSENT_VERSION,
       };
 
       const session =
         await stripe
           .checkout
           .sessions
-          .create({
-            mode:
-              BILLING_PLANS[
-                planCode
-              ].checkoutMode,
+          .create(
+            {
+              mode:
+                BILLING_PLANS[
+                  planCode
+                ].checkoutMode,
 
-            customer:
-              stripeCustomerId,
+              customer:
+                stripeCustomerId,
 
-            client_reference_id:
-              userId,
+              client_reference_id:
+                userId,
 
-            line_items: [
-              {
-                price:
-                  stripePriceId,
+              line_items: [
+                {
+                  price:
+                    stripePriceId,
 
-                quantity:
-                  1,
-              },
-            ],
+                  quantity:
+                    1,
+                },
+              ],
 
-            success_url:
-              `${appBaseUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
+              success_url:
+                `${appBaseUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
 
-            cancel_url:
-              `${appBaseUrl}/checkout/cancel`,
+              cancel_url:
+                `${appBaseUrl}/checkout/cancel`,
 
-            locale:
-              "pl",
+              locale:
+                "pl",
 
-            metadata,
-
-            payment_intent_data: {
               metadata,
+
+              payment_intent_data: {
+                metadata,
+              },
             },
-          });
+
+            /*
+             * Protect Stripe-side retries of this exact purchase
+             * attempt from creating more than one Checkout Session.
+             */
+            {
+              idempotencyKey:
+                `poprostumatma:checkout:${checkoutAttemptId}`,
+            },
+          );
 
       if (!session.url) {
         throw new Error(
@@ -789,10 +1027,10 @@ export const handler:
       }
 
       /*
-       * Return only data required by the browser.
+       * Only browser-required data leaves the trusted backend.
        *
-       * Internal Stripe identifiers, billing state and secrets
-       * remain server-side.
+       * CheckoutAttempt IDs, Stripe customer IDs, payment metadata
+       * and billing state remain server-side.
        */
       return {
         status:
@@ -805,10 +1043,6 @@ export const handler:
           null,
       };
     } catch (error) {
-      /*
-       * Expected client/business errors may safely be returned
-       * through AppSync without exposing infrastructure details.
-       */
       if (
         error instanceof
         CheckoutClientError
@@ -822,8 +1056,8 @@ export const handler:
        * - Stripe secret keys,
        * - Checkout URLs,
        * - JWTs,
-       * - full Stripe error objects,
-       * - payment metadata.
+       * - payment metadata,
+       * - full Stripe error objects.
        */
       console.error(
         "Failed to create Stripe Checkout Session.",

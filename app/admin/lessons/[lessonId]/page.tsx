@@ -555,8 +555,7 @@ export default function AdminLessonPage() {
       <div className="mt-8 grid gap-8 xl:grid-cols-2">
         <LessonAssetUploader
           lessonId={lesson.id}
-          courseSlug={course.slug}
-          lessonSlug={lesson.slug}
+          courseId={course.id}
           assetType="video"
           currentPath={lesson.videoPath}
           onPathSaved={(path) =>
@@ -579,8 +578,7 @@ export default function AdminLessonPage() {
 
         <LessonAssetUploader
           lessonId={lesson.id}
-          courseSlug={course.slug}
-          lessonSlug={lesson.slug}
+          courseId={course.id}
           assetType="materials"
           currentPath={
             lesson.materialsPath

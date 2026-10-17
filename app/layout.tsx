@@ -1,12 +1,17 @@
+// import site metadata from "@/site-metadata.json";
 import type {
   Metadata,
 } from "next";
 
+
+// Import Next.js mechanisms for font optimization. The Geist font is used for the main
 import {
   Geist,
   Geist_Mono,
 } from "next/font/google";
 
+
+//Imports
 import AuthProvider from "@/components/auth/AuthProvider";
 import LegalAccessGuard from "@/components/auth/LegalAccessGuard";
 import ConfigureAmplify from "@/components/ConfigureAmplify";

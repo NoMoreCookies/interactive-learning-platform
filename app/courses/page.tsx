@@ -315,7 +315,7 @@ export default function CoursesPage() {
           subject={selectedSubject}
         />
 
-        <div className="relative z-10 max-w-3xl">
+        <div className="relative z-10 max-w-[1008px]">
           <div className="mb-6 flex items-end justify-between gap-6">
             <div>
               <p className="text-sm uppercase tracking-widest text-zinc-500">
@@ -341,7 +341,7 @@ export default function CoursesPage() {
 
           <div
             key={selectedSubject}
-            className="grid gap-6 md:grid-cols-2"
+            className="grid grid-cols-1 gap-6 sm:grid-cols-[repeat(2,minmax(0,320px))] xl:grid-cols-[repeat(3,minmax(0,320px))]"
           >
             {filteredCourses.length > 0 ? (
               filteredCourses.map(

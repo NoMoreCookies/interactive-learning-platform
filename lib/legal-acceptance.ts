@@ -10,6 +10,9 @@ import {
 
 const client = generateClient<Schema>();
 
+const LEGAL_ACCEPTANCE_PAGE_SIZE = 100;
+const MAX_LEGAL_ACCEPTANCE_PAGES = 20;
+
 export type LegalUpdateRequirement =
   | "none"
   | "terms"
@@ -17,26 +20,55 @@ export type LegalUpdateRequirement =
   | "both";
 
 export async function getLegalUpdateRequirement(): Promise<LegalUpdateRequirement> {
-  const { userId } = await getCurrentUser();
+  const { userId } =
+    await getCurrentUser();
 
   let hasCurrentTerms = false;
   let hasCurrentPrivacy = false;
-  let nextToken: string | null | undefined;
+
+  let nextToken:
+    | string
+    | null
+    | undefined;
+
+  let pageCount = 0;
+
+  const seenNextTokens =
+    new Set<string>();
 
   do {
+    pageCount += 1;
+
+    if (
+      pageCount >
+      MAX_LEGAL_ACCEPTANCE_PAGES
+    ) {
+      console.error(
+        "Legal acceptance pagination exceeded the maximum page limit.",
+      );
+
+      throw new Error(
+        "Nie udało się bezpiecznie sprawdzić zaakceptowanych dokumentów.",
+      );
+    }
+
     const {
       data,
       errors,
       nextToken: newNextToken,
-    } = await client.models.LegalAcceptance.list({
-      filter: {
-        userId: {
-          eq: userId,
+    } =
+      await client.models.LegalAcceptance.list(
+        {
+          filter: {
+            userId: {
+              eq: userId,
+            },
+          },
+          limit:
+            LEGAL_ACCEPTANCE_PAGE_SIZE,
+          nextToken,
         },
-      },
-      limit: 100,
-      nextToken,
-    });
+      );
 
     if (errors?.length) {
       console.error(
@@ -70,6 +102,26 @@ export async function getLegalUpdateRequirement(): Promise<LegalUpdateRequiremen
       hasCurrentPrivacy
     ) {
       return "none";
+    }
+
+    if (newNextToken) {
+      if (
+        seenNextTokens.has(
+          newNextToken,
+        )
+      ) {
+        console.error(
+          "Legal acceptance pagination returned a repeated nextToken.",
+        );
+
+        throw new Error(
+          "Nie udało się bezpiecznie sprawdzić zaakceptowanych dokumentów.",
+        );
+      }
+
+      seenNextTokens.add(
+        newNextToken,
+      );
     }
 
     nextToken = newNextToken;

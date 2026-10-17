@@ -10,6 +10,14 @@ export type PremiumStatus = {
   accessUntil: string | null;
 };
 
+export type CheckoutConsents = {
+  immediateDeliveryConsent:
+    boolean;
+
+  withdrawalRightLossAcknowledged:
+    boolean;
+};
+
 export type CreateCheckoutSessionResult =
   | {
       status: "READY";
@@ -34,28 +42,53 @@ export type CheckoutResult = {
 /*
  * Starts a server-side Stripe Checkout flow.
  *
- * The backend may return:
+ * The browser may select only:
+ * - a trusted plan code,
+ * - the two explicit checkout declarations.
  *
- * READY:
- *   A new Stripe Checkout Session was created successfully.
- *
- * RATE_LIMITED:
- *   The user attempted to create another Checkout Session too soon.
- *
- * Rate limiting is enforced by the backend. The retry value returned
- * here is used only to improve frontend UX.
+ * Authoritative purchase data such as userId, price, currency,
+ * access duration, legal versions and timestamps is resolved by
+ * trusted backend code.
  */
 export async function createCheckoutSession(
   planCode: BillingPlanCode,
+  consents: CheckoutConsents,
 ): Promise<CreateCheckoutSessionResult> {
+  /*
+   * Frontend validation improves UX only.
+   *
+   * The backend independently requires both declarations to be
+   * exactly true and persists the authoritative consent snapshot.
+   */
+  if (
+    consents
+      .immediateDeliveryConsent !==
+      true ||
+    consents
+      .withdrawalRightLossAcknowledged !==
+      true
+  ) {
+    throw new Error(
+      "Musisz potwierdzić wymagane oświadczenia przed rozpoczęciem płatności.",
+    );
+  }
+
   const {
     data,
     errors,
   } =
-    await amplifyClient.queries
+    await amplifyClient.mutations
       .createCheckoutSession(
         {
           planCode,
+
+          immediateDeliveryConsent:
+            consents
+              .immediateDeliveryConsent,
+
+          withdrawalRightLossAcknowledged:
+            consents
+              .withdrawalRightLossAcknowledged,
         },
         {
           authMode:
@@ -86,9 +119,6 @@ export async function createCheckoutSession(
     );
   }
 
-  /*
-   * Successful Checkout Session creation.
-   */
   if (
     data.status ===
     "READY"
@@ -117,13 +147,6 @@ export async function createCheckoutSession(
     };
   }
 
-  /*
-   * Expected rate-limit response.
-   *
-   * This is not treated as a backend failure. The frontend can use
-   * retryAfterSeconds to display a local countdown without polling
-   * AWS.
-   */
   if (
     data.status ===
     "RATE_LIMITED"
@@ -131,13 +154,6 @@ export async function createCheckoutSession(
     const retryAfterSeconds =
       data.retryAfterSeconds;
 
-    /*
-     * Validate server data before using it in frontend state.
-     *
-     * 300 seconds is deliberately much larger than the current
-     * 20-second backend cooldown while still rejecting obviously
-     * malformed values.
-     */
     if (
       typeof retryAfterSeconds !==
         "number" ||
@@ -164,7 +180,7 @@ export async function createCheckoutSession(
   }
 
   /*
-   * Fail closed if backend and frontend contracts ever drift apart.
+   * Fail closed if frontend and backend contracts ever drift apart.
    */
   throw new Error(
     "Backend zwrócił nieprawidłowy status płatności.",

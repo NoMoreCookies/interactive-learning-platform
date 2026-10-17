@@ -1,6 +1,21 @@
 export const BILLING_CONTRACT_VERSION =
-  "1";
+  "1" as const;
 
+/*
+ * IMPORTANT:
+ *
+ * Once a billing contract version has been used in production,
+ * its historical meaning must never be changed.
+ *
+ * CheckoutAttempt stores an immutable snapshot of the actual
+ * billing contract used for each Checkout Session.
+ *
+ * Before production launch, version "1" represents:
+ *
+ * ONE_MONTH
+ * 79.99 PLN
+ * 30 days
+ */
 export const BILLING_PLAN_CODES = [
   "ONE_MONTH",
 ] as const;
@@ -20,17 +35,21 @@ export const BILLING_PLANS = {
     checkoutMode: "payment",
     accessDays: 30,
     currency: "pln",
-    unitAmount: 4999,
+    unitAmount: 7999,
   },
-} satisfies Record<
+} as const satisfies Record<
   BillingPlanCode,
   BillingPlan
 >;
 
 export function isBillingPlanCode(
-  value: string,
+  value: unknown,
 ): value is BillingPlanCode {
-  return BILLING_PLAN_CODES.some(
-    (planCode) => planCode === value,
+  return (
+    typeof value === "string" &&
+    BILLING_PLAN_CODES.some(
+      (planCode) =>
+        planCode === value,
+    )
   );
 }

@@ -1,5 +1,7 @@
 import Link from "next/link";
 
+import CourseThumbnail from "@/components/courses/CourseThumbnail";
+
 import type {
   getPublishedCourses,
 } from "@/lib/services/course-service";
@@ -19,8 +21,13 @@ export default function CourseCard({
   course,
 }: CourseCardProps) {
   return (
-    <article className="rounded-2xl border border-zinc-800 bg-zinc-950 p-6">
-      <h2 className="mt-2 text-2xl font-semibold">
+    <article className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 p-6">
+      <CourseThumbnail
+        path={course.thumbnailPath}
+        courseTitle={course.title}
+      />
+
+      <h2 className="mt-5 text-2xl font-semibold">
         {course.title}
       </h2>
 

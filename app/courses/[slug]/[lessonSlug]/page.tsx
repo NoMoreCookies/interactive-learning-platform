@@ -21,6 +21,11 @@ import {
 } from "@/lib/services/billing-service";
 
 import {
+  ONE_MONTH_PRICE_LABEL,
+  ONE_MONTH_PUBLIC_PLAN,
+} from "@/lib/billing/public-plans";
+
+import {
   getLessonPageData,
   getPremiumLessonAssetUrl,
   getPremiumLessonContent,
@@ -793,11 +798,11 @@ export default function LessonPage({
 
               <div className="w-full rounded-2xl border border-zinc-800 bg-zinc-950/80 p-6 md:w-64">
                 <p className="text-3xl font-bold text-zinc-100">
-                  49,99 zł
+                  {ONE_MONTH_PRICE_LABEL}
                 </p>
 
                 <p className="mt-1 text-sm text-zinc-500">
-                  30 dni dostępu
+                  {ONE_MONTH_PUBLIC_PLAN.accessDays} dni dostępu
                 </p>
 
                 <Link

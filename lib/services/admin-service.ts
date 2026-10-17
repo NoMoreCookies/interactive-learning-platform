@@ -133,6 +133,91 @@ export async function updateAdminCourse(input: {
   return data;
 }
 
+export async function updateAdminCourseThumbnailPath(input: {
+  courseId: string;
+  thumbnailPath: string | null;
+}) {
+  const normalizedCourseId =
+    input.courseId.trim();
+
+  if (!normalizedCourseId) {
+    throw new Error(
+      "Brak identyfikatora kursu.",
+    );
+  }
+
+  const { data, errors } =
+    await amplifyClient.models.Course.update({
+      id: normalizedCourseId,
+      thumbnailPath: input.thumbnailPath,
+    });
+
+  if (errors?.length) {
+    console.error(
+      "Błąd aktualizacji miniaturki kursu:",
+      { errorCount: errors.length },
+    );
+
+    throw new Error(
+      "Nie udało się zapisać miniaturki kursu.",
+    );
+  }
+
+  if (!data) {
+    throw new Error(
+      "Amplify nie zwróciło zaktualizowanego kursu.",
+    );
+  }
+
+  return data;
+}
+
+export async function deleteAdminCourse(input: {
+  courseId: string;
+  confirmationSlug: string;
+}) {
+  const { data, errors } =
+    await amplifyClient.mutations.deleteAdminCourse({
+      courseId:
+        input.courseId,
+
+      confirmationSlug:
+        input.confirmationSlug,
+    });
+
+  if (errors?.length) {
+    console.error(
+      "Błąd bezpiecznego usuwania kursu:",
+      {
+        errorCount:
+          errors.length,
+      },
+    );
+
+    const firstMessage =
+      errors.find(
+        (error) =>
+          typeof error.message ===
+            "string" &&
+          error.message.length >
+            0,
+      )?.message;
+
+    throw new Error(
+      firstMessage ??
+        "Nie udało się usunąć kursu.",
+    );
+  }
+
+  if (!data) {
+    throw new Error(
+      "Backend nie zwrócił wyniku usuwania kursu.",
+    );
+  }
+
+  return data;
+}
+
 /*
  * MODULES
  */

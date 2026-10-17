@@ -22,6 +22,11 @@ import {
   type PremiumStatus,
 } from "@/lib/services/billing-service";
 
+import {
+  ONE_MONTH_PRICE_LABEL,
+  ONE_MONTH_PUBLIC_PLAN,
+} from "@/lib/billing/public-plans";
+
 function formatAccessUntil(
   value: string | null,
 ): string | null {
@@ -104,6 +109,26 @@ export default function AccountPage() {
     useState<string | null>(
       null,
     );
+
+  /*
+   * Checkout-specific declarations are intentionally not persisted
+   * in localStorage and are never pre-checked.
+   *
+   * The user must make these declarations explicitly for each
+   * purchase attempt. The backend independently validates that both
+   * values are exactly true and persists the authoritative snapshot.
+   */
+  const [
+    immediateDeliveryConsent,
+    setImmediateDeliveryConsent,
+  ] =
+    useState(false);
+
+  const [
+    withdrawalRightLossAcknowledged,
+    setWithdrawalRightLossAcknowledged,
+  ] =
+    useState(false);
 
   /*
    * Absolute client-side timestamp indicating when the user may
@@ -285,6 +310,24 @@ export default function AccountPage() {
       return;
     }
 
+    /*
+     * UX validation only.
+     *
+     * Security and legal-audit enforcement remain server-side.
+     */
+    if (
+      immediateDeliveryConsent !==
+        true ||
+      withdrawalRightLossAcknowledged !==
+        true
+    ) {
+      setCheckoutError(
+        "Potwierdź oba wymagane oświadczenia przed przejściem do płatności.",
+      );
+
+      return;
+    }
+
     setIsCheckoutLoading(
       true,
     );
@@ -297,6 +340,10 @@ export default function AccountPage() {
       const result =
         await createCheckoutSession(
           "ONE_MONTH",
+          {
+            immediateDeliveryConsent,
+            withdrawalRightLossAcknowledged,
+          },
         );
 
       /*
@@ -408,10 +455,15 @@ export default function AccountPage() {
         null,
     );
 
+  const hasRequiredCheckoutConsents =
+    immediateDeliveryConsent &&
+    withdrawalRightLossAcknowledged;
+
   const isCheckoutBlocked =
     isCheckoutLoading ||
     checkoutCooldownSeconds >
-      0;
+      0 ||
+    !hasRequiredCheckoutConsents;
 
   return (
     <main className="mx-auto w-full max-w-4xl px-6 py-16">
@@ -535,15 +587,97 @@ export default function AccountPage() {
             {!isAdmin &&
               !isPremiumLoading &&
               !premiumError && (
-                <div className="w-full shrink-0 md:w-64">
+                <div className="w-full shrink-0 md:w-96">
                   <div className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-5">
                     <p className="text-3xl font-bold text-zinc-100">
-                      49,99 zł
+                      {ONE_MONTH_PRICE_LABEL}
                     </p>
 
                     <p className="mt-1 text-sm text-zinc-500">
-                      30 dni dostępu
+                      {ONE_MONTH_PUBLIC_PLAN.accessDays} dni dostępu
                     </p>
+
+                    <p className="mt-4 text-sm leading-6 text-zinc-300">
+                      Jednorazowa płatność. Dostęp nie odnawia się
+                      automatycznie.
+                    </p>
+
+                    <div className="mt-5 space-y-4 border-t border-zinc-800 pt-5">
+                      <label className="flex cursor-pointer items-start gap-3 text-sm leading-6 text-zinc-300">
+                        <input
+                          type="checkbox"
+                          checked={
+                            immediateDeliveryConsent
+                          }
+                          onChange={(event) => {
+                            setImmediateDeliveryConsent(
+                              event.target.checked,
+                            );
+
+                            setCheckoutError(
+                              null,
+                            );
+                          }}
+                          disabled={
+                            isCheckoutLoading
+                          }
+                          className="mt-1 h-4 w-4 shrink-0 cursor-pointer rounded border-zinc-700 bg-zinc-900 accent-blue-600 disabled:cursor-not-allowed"
+                        />
+
+                        <span>
+                          Żądam rozpoczęcia dostarczania treści cyfrowych
+                          objętych dostępem Premium niezwłocznie po zawarciu
+                          umowy, przed upływem 14-dniowego terminu na
+                          odstąpienie od umowy.
+                        </span>
+                      </label>
+
+                      <label className="flex cursor-pointer items-start gap-3 text-sm leading-6 text-zinc-300">
+                        <input
+                          type="checkbox"
+                          checked={
+                            withdrawalRightLossAcknowledged
+                          }
+                          onChange={(event) => {
+                            setWithdrawalRightLossAcknowledged(
+                              event.target.checked,
+                            );
+
+                            setCheckoutError(
+                              null,
+                            );
+                          }}
+                          disabled={
+                            isCheckoutLoading
+                          }
+                          className="mt-1 h-4 w-4 shrink-0 cursor-pointer rounded border-zinc-700 bg-zinc-900 accent-blue-600 disabled:cursor-not-allowed"
+                        />
+
+                        <span>
+                          Przyjmuję do wiadomości, że z chwilą rozpoczęcia
+                          dostarczania treści cyfrowych za moją uprzednią i
+                          wyraźną zgodą utracę prawo do odstąpienia od umowy.
+                        </span>
+                      </label>
+
+                      <p className="text-xs leading-5 text-zinc-500">
+                        Przed zakupem możesz ponownie przeczytać{" "}
+                        <Link
+                          href="/termsAndConditions"
+                          className="text-blue-300 underline underline-offset-2 hover:text-blue-200"
+                        >
+                          Regulamin
+                        </Link>{" "}
+                        oraz{" "}
+                        <Link
+                          href="/privacyPolicy"
+                          className="text-blue-300 underline underline-offset-2 hover:text-blue-200"
+                        >
+                          Politykę prywatności
+                        </Link>
+                        .
+                      </p>
+                    </div>
 
                     <button
                       type="button"
@@ -553,7 +687,7 @@ export default function AccountPage() {
                       disabled={
                         isCheckoutBlocked
                       }
-                      className="mt-5 w-full rounded-xl bg-blue-600 px-4 py-3 font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="mt-5 w-full rounded-xl bg-blue-600 px-4 py-3 font-semibold text-white transition hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {isCheckoutLoading
                         ? "Przekierowywanie..."
@@ -561,14 +695,19 @@ export default function AccountPage() {
                             0
                           ? `Spróbuj ponownie za ${checkoutCooldownSeconds} s`
                           : premiumStatus?.active
-                            ? "Przedłuż o 30 dni"
-                            : "Kup 30 dni dostępu"}
+                            ? `Przedłużam i płacę ${ONE_MONTH_PRICE_LABEL}`
+                            : `Kupuję i płacę ${ONE_MONTH_PRICE_LABEL}`}
                     </button>
 
-                    <p className="mt-3 text-xs leading-5 text-zinc-500">
-                      Jednorazowa płatność. Dostęp nie odnawia się
-                      automatycznie.
-                    </p>
+                    {!hasRequiredCheckoutConsents &&
+                      !isCheckoutLoading &&
+                      checkoutCooldownSeconds ===
+                        0 && (
+                        <p className="mt-3 text-xs leading-5 text-zinc-500">
+                          Aby przejść do płatności, zaznacz oba wymagane
+                          oświadczenia.
+                        </p>
+                      )}
                   </div>
 
                   {checkoutError && (

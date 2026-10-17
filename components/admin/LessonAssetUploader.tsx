@@ -16,8 +16,7 @@ import {
 
 type LessonAssetUploaderProps = {
   lessonId: string;
-  courseSlug: string;
-  lessonSlug: string;
+  courseId: string;
   assetType:
     | "video"
     | "materials";
@@ -66,8 +65,7 @@ function formatFileSize(
 
 export default function LessonAssetUploader({
   lessonId,
-  courseSlug,
-  lessonSlug,
+  courseId,
   assetType,
   currentPath,
   onPathSaved,
@@ -266,6 +264,14 @@ export default function LessonAssetUploader({
       return;
     }
 
+    if (!courseId.trim()) {
+      setStatusMessage(
+        "Brak identyfikatora kursu.",
+      );
+
+      return;
+    }
+
     if (!lessonId.trim()) {
       setStatusMessage(
         "Brak identyfikatora lekcji.",
@@ -312,8 +318,8 @@ export default function LessonAssetUploader({
 
       const newPath =
         buildLessonFilePath(
-          courseSlug,
-          lessonSlug,
+          courseId,
+          lessonId,
           fileName,
         );
 

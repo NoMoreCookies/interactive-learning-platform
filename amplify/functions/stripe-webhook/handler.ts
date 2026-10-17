@@ -17,13 +17,6 @@ import {
   env,
 } from "$amplify/env/stripe-webhook";
 
-import {
-  BILLING_CONTRACT_VERSION,
-  BILLING_PLANS,
-  isBillingPlanCode,
-  type BillingPlanCode,
-} from "../../shared/billing-plans";
-
 const dynamoDb =
   new DynamoDBClient({});
 
@@ -50,13 +43,29 @@ class WebhookContractError extends Error {
   }
 }
 
-type VerifiedCheckout = {
-  session: Stripe.Checkout.Session;
+type CheckoutAttemptSnapshot = {
+  checkoutAttemptId: string;
   userId: string;
   stripeCustomerId: string;
-  planCode: BillingPlanCode;
+  planCode: string;
+  billingContractVersion: string;
+  stripePriceId: string;
+  amountTotal: number;
+  currency: string;
+  checkoutMode: "payment";
+  accessDays: number;
   termsVersion: string;
   privacyVersion: string;
+  checkoutConsentVersion: string;
+  immediateDeliveryConsent: true;
+  withdrawalRightLossAcknowledged: true;
+  consentedAt: string;
+  status: "CREATED" | "PAID";
+};
+
+type VerifiedCheckout = {
+  session: Stripe.Checkout.Session;
+  attempt: CheckoutAttemptSnapshot;
 };
 
 type EntitlementSnapshot =
@@ -69,6 +78,52 @@ type EntitlementSnapshot =
       revokedAt: string | null;
       version: number;
     };
+
+function requireRuntimeEnvironmentVariable(
+  name: string,
+): string {
+  const value =
+    process.env[name]
+      ?.trim();
+
+  if (!value) {
+    throw new Error(
+      `Missing required runtime environment variable: ${name}.`,
+    );
+  }
+
+  return value;
+}
+
+/*
+ * Table names are injected by backend.ts after the Amplify function
+ * definition is created. Reading them from process.env avoids coupling
+ * runtime code to stale generated $amplify/env typings.
+ */
+const billingCustomerTableName =
+  requireRuntimeEnvironmentVariable(
+    "BILLING_CUSTOMER_TABLE_NAME",
+  );
+
+const stripeEventTableName =
+  requireRuntimeEnvironmentVariable(
+    "STRIPE_EVENT_TABLE_NAME",
+  );
+
+const billingPurchaseTableName =
+  requireRuntimeEnvironmentVariable(
+    "BILLING_PURCHASE_TABLE_NAME",
+  );
+
+const entitlementTableName =
+  requireRuntimeEnvironmentVariable(
+    "ENTITLEMENT_TABLE_NAME",
+  );
+
+const checkoutAttemptTableName =
+  requireRuntimeEnvironmentVariable(
+    "CHECKOUT_ATTEMPT_TABLE_NAME",
+  );
 
 function jsonResponse(
   statusCode: number,
@@ -125,7 +180,8 @@ function getStripeSignature(
 function getExpectedLivemode():
   boolean {
   const value =
-    env.STRIPE_EXPECTED_LIVEMODE;
+    env
+      .STRIPE_EXPECTED_LIVEMODE;
 
   if (value === "true") {
     return true;
@@ -138,17 +194,6 @@ function getExpectedLivemode():
   throw new Error(
     "Invalid STRIPE_EXPECTED_LIVEMODE configuration.",
   );
-}
-
-function getStripePriceId(
-  planCode: BillingPlanCode,
-): string {
-  switch (planCode) {
-    case "ONE_MONTH":
-      return env
-        .STRIPE_PRICE_ONE_MONTH
-        .trim();
-  }
 }
 
 function requireMetadata(
@@ -199,26 +244,340 @@ function getStripeCustomerId(
 function getPaymentIntentId(
   session:
     Stripe.Checkout.Session,
-): string | null {
+): string {
   const paymentIntent =
     session.payment_intent;
 
+  /*
+   * Stripe may return only the PaymentIntent ID.
+   */
   if (
     typeof paymentIntent ===
     "string"
   ) {
-    return paymentIntent;
+    if (
+      paymentIntent.startsWith(
+        "pi_",
+      )
+    ) {
+      return paymentIntent;
+    }
+
+    throw new WebhookContractError(
+      "invalid_payment_intent",
+    );
   }
 
+  /*
+   * Or Stripe may return an expanded PaymentIntent object.
+   *
+   * At this point TypeScript already knows that paymentIntent
+   * cannot be a string.
+   */
   if (
     paymentIntent &&
     typeof paymentIntent.id ===
-      "string"
+      "string" &&
+    paymentIntent.id.startsWith(
+      "pi_",
+    )
   ) {
     return paymentIntent.id;
   }
 
-  return null;
+  /*
+   * A successfully paid one-time Checkout must have a usable
+   * PaymentIntent because refunds are later anchored to it.
+   */
+  throw new WebhookContractError(
+    "missing_payment_intent",
+  );
+}
+
+function isCanonicalIsoTimestamp(
+  value: string,
+): boolean {
+  const timestamp =
+    Date.parse(value);
+
+  if (
+    !Number.isFinite(
+      timestamp,
+    )
+  ) {
+    return false;
+  }
+
+  return (
+    new Date(timestamp)
+      .toISOString() === value
+  );
+}
+
+function getRequiredStringAttribute(
+  item: Record<string, AttributeValue>,
+  fieldName: string,
+): string {
+  const value =
+    item[fieldName];
+
+  if (
+    !value ||
+    !("S" in value) ||
+    typeof value.S !== "string" ||
+    !value.S.trim()
+  ) {
+    throw new Error(
+      `Invalid CheckoutAttempt.${fieldName}.`,
+    );
+  }
+
+  return value.S.trim();
+}
+
+function getRequiredPositiveIntegerAttribute(
+  item: Record<string, AttributeValue>,
+  fieldName: string,
+): number {
+  const value =
+    item[fieldName];
+
+  if (
+    !value ||
+    !("N" in value) ||
+    typeof value.N !== "string"
+  ) {
+    throw new Error(
+      `Invalid CheckoutAttempt.${fieldName}.`,
+    );
+  }
+
+  const parsed =
+    Number(value.N);
+
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed <= 0
+  ) {
+    throw new Error(
+      `Invalid CheckoutAttempt.${fieldName}.`,
+    );
+  }
+
+  return parsed;
+}
+
+function getRequiredTrueBooleanAttribute(
+  item: Record<string, AttributeValue>,
+  fieldName: string,
+): true {
+  const value =
+    item[fieldName];
+
+  if (
+    !value ||
+    !("BOOL" in value) ||
+    value.BOOL !== true
+  ) {
+    throw new Error(
+      `Invalid CheckoutAttempt.${fieldName}.`,
+    );
+  }
+
+  return true;
+}
+
+async function getCheckoutAttempt(
+  checkoutAttemptId: string,
+): Promise<CheckoutAttemptSnapshot> {
+  const response =
+    await dynamoDb.send(
+      new GetItemCommand({
+        TableName:
+          checkoutAttemptTableName,
+
+        Key: {
+          checkoutAttemptId: {
+            S:
+              checkoutAttemptId,
+          },
+        },
+
+        ConsistentRead:
+          true,
+      }),
+    );
+
+  const item =
+    response.Item;
+
+  if (!item) {
+    throw new WebhookContractError(
+      "checkout_attempt_not_found",
+    );
+  }
+
+  const storedAttemptId =
+    getRequiredStringAttribute(
+      item,
+      "checkoutAttemptId",
+    );
+
+  if (
+    storedAttemptId !==
+      checkoutAttemptId
+  ) {
+    throw new Error(
+      "CheckoutAttempt primary key mismatch.",
+    );
+  }
+
+  const checkoutMode =
+    getRequiredStringAttribute(
+      item,
+      "checkoutMode",
+    );
+
+  if (
+    checkoutMode !== "payment"
+  ) {
+    throw new Error(
+      "Invalid CheckoutAttempt.checkoutMode.",
+    );
+  }
+
+  const currency =
+    getRequiredStringAttribute(
+      item,
+      "currency",
+    );
+
+  if (
+    !/^[a-z]{3}$/.test(
+      currency,
+    )
+  ) {
+    throw new Error(
+      "Invalid CheckoutAttempt.currency.",
+    );
+  }
+
+  const consentedAt =
+    getRequiredStringAttribute(
+      item,
+      "consentedAt",
+    );
+
+  if (
+    !isCanonicalIsoTimestamp(
+      consentedAt,
+    )
+  ) {
+    throw new Error(
+      "Invalid CheckoutAttempt.consentedAt.",
+    );
+  }
+
+  const rawStatus =
+    getRequiredStringAttribute(
+      item,
+      "status",
+    );
+
+  if (
+    rawStatus !== "CREATED" &&
+    rawStatus !== "PAID"
+  ) {
+    throw new Error(
+      "Invalid CheckoutAttempt.status.",
+    );
+  }
+
+  return {
+    checkoutAttemptId:
+      storedAttemptId,
+
+    userId:
+      getRequiredStringAttribute(
+        item,
+        "userId",
+      ),
+
+    stripeCustomerId:
+      getRequiredStringAttribute(
+        item,
+        "stripeCustomerId",
+      ),
+
+    planCode:
+      getRequiredStringAttribute(
+        item,
+        "planCode",
+      ),
+
+    billingContractVersion:
+      getRequiredStringAttribute(
+        item,
+        "billingContractVersion",
+      ),
+
+    stripePriceId:
+      getRequiredStringAttribute(
+        item,
+        "stripePriceId",
+      ),
+
+    amountTotal:
+      getRequiredPositiveIntegerAttribute(
+        item,
+        "amountTotal",
+      ),
+
+    currency,
+
+    checkoutMode,
+
+    accessDays:
+      getRequiredPositiveIntegerAttribute(
+        item,
+        "accessDays",
+      ),
+
+    termsVersion:
+      getRequiredStringAttribute(
+        item,
+        "termsVersion",
+      ),
+
+    privacyVersion:
+      getRequiredStringAttribute(
+        item,
+        "privacyVersion",
+      ),
+
+    checkoutConsentVersion:
+      getRequiredStringAttribute(
+        item,
+        "checkoutConsentVersion",
+      ),
+
+    immediateDeliveryConsent:
+      getRequiredTrueBooleanAttribute(
+        item,
+        "immediateDeliveryConsent",
+      ),
+
+    withdrawalRightLossAcknowledged:
+      getRequiredTrueBooleanAttribute(
+        item,
+        "withdrawalRightLossAcknowledged",
+      ),
+
+    consentedAt,
+
+    status:
+      rawStatus,
+  };
 }
 
 async function getStoredCustomerId(
@@ -228,8 +587,7 @@ async function getStoredCustomerId(
     await dynamoDb.send(
       new GetItemCommand({
         TableName:
-          env
-            .BILLING_CUSTOMER_TABLE_NAME,
+          billingCustomerTableName,
 
         Key: {
           userId: {
@@ -240,7 +598,8 @@ async function getStoredCustomerId(
         ProjectionExpression:
           "stripeCustomerId",
 
-        ConsistentRead: true,
+        ConsistentRead:
+          true,
       }),
     );
 
@@ -253,6 +612,12 @@ async function getStoredCustomerId(
   );
 }
 
+/*
+ * The CheckoutAttempt is the historical source of truth for the contract
+ * used to create this session. No comparison is made against the CURRENT
+ * BILLING_PLANS or CURRENT billing contract version, so an in-flight valid
+ * checkout remains fulfillable after a future price/configuration deploy.
+ */
 async function verifyCheckoutContract(
   stripeEvent: Stripe.Event,
 ): Promise<VerifiedCheckout> {
@@ -274,33 +639,40 @@ async function verifyCheckoutContract(
     );
   }
 
-  const rawPlanCode =
-    requireMetadata(
-      session,
-      "planCode",
-    );
-
   if (
-    !isBillingPlanCode(
-      rawPlanCode,
+    typeof session.id !== "string" ||
+    !session.id.startsWith(
+      "cs_",
     )
   ) {
     throw new WebhookContractError(
-      "invalid_plan_code",
+      "invalid_checkout_session_id",
     );
   }
 
-  const planCode =
-    rawPlanCode;
+  if (
+    session.status !==
+      "complete"
+  ) {
+    throw new WebhookContractError(
+      "checkout_not_complete",
+    );
+  }
 
-  const plan =
-    BILLING_PLANS[
-      planCode
-    ];
+  const checkoutAttemptId =
+    requireMetadata(
+      session,
+      "checkoutAttemptId",
+    );
+
+  const attempt =
+    await getCheckoutAttempt(
+      checkoutAttemptId,
+    );
 
   if (
     session.mode !==
-      plan.checkoutMode
+      attempt.checkoutMode
   ) {
     throw new WebhookContractError(
       "wrong_checkout_mode",
@@ -308,67 +680,73 @@ async function verifyCheckoutContract(
   }
 
   if (
-    session.status !==
-    "complete"
-  ) {
-    throw new WebhookContractError(
-      "checkout_not_complete",
-    );
-  }
-
-  if (
     session.currency !==
-      plan.currency ||
+      attempt.currency ||
     session.amount_total !==
-      plan.unitAmount
+      attempt.amountTotal
   ) {
     throw new WebhookContractError(
       "wrong_amount_or_currency",
     );
   }
 
-  const contractVersion =
-    requireMetadata(
-      session,
-      "billingContractVersion",
-    );
+  const metadataChecks:
+    Array<[
+      string,
+      string,
+    ]> = [
+      [
+        "appUserId",
+        attempt.userId,
+      ],
+      [
+        "planCode",
+        attempt.planCode,
+      ],
+      [
+        "billingContractVersion",
+        attempt.billingContractVersion,
+      ],
+      [
+        "stripePriceId",
+        attempt.stripePriceId,
+      ],
+      [
+        "termsVersion",
+        attempt.termsVersion,
+      ],
+      [
+        "privacyVersion",
+        attempt.privacyVersion,
+      ],
+      [
+        "checkoutConsentVersion",
+        attempt.checkoutConsentVersion,
+      ],
+    ];
 
-  if (
-    contractVersion !==
-    BILLING_CONTRACT_VERSION
+  for (
+    const [
+      key,
+      expectedValue,
+    ] of metadataChecks
   ) {
-    throw new WebhookContractError(
-      "wrong_contract_version",
-    );
+    if (
+      requireMetadata(
+        session,
+        key,
+      ) !== expectedValue
+    ) {
+      throw new WebhookContractError(
+        `metadata_mismatch_${key}`,
+      );
+    }
   }
-
-  const metadataPriceId =
-    requireMetadata(
-      session,
-      "stripePriceId",
-    );
-
-  if (
-    metadataPriceId !==
-      getStripePriceId(
-        planCode,
-      )
-  ) {
-    throw new WebhookContractError(
-      "wrong_price_id",
-    );
-  }
-
-  const userId =
-    requireMetadata(
-      session,
-      "appUserId",
-    );
 
   if (
     session
       .client_reference_id !==
-    userId
+    attempt.userId
   ) {
     throw new WebhookContractError(
       "user_reference_mismatch",
@@ -380,9 +758,18 @@ async function verifyCheckoutContract(
       session,
     );
 
+  if (
+    stripeCustomerId !==
+      attempt.stripeCustomerId
+  ) {
+    throw new WebhookContractError(
+      "checkout_attempt_customer_mismatch",
+    );
+  }
+
   const storedCustomerId =
     await getStoredCustomerId(
-      userId,
+      attempt.userId,
     );
 
   if (
@@ -395,25 +782,9 @@ async function verifyCheckoutContract(
     );
   }
 
-  const termsVersion =
-    requireMetadata(
-      session,
-      "termsVersion",
-    );
-
-  const privacyVersion =
-    requireMetadata(
-      session,
-      "privacyVersion",
-    );
-
   return {
     session,
-    userId,
-    stripeCustomerId,
-    planCode,
-    termsVersion,
-    privacyVersion,
+    attempt,
   };
 }
 
@@ -453,6 +824,7 @@ function isTransactionCanceled(
 
 async function recordEventOnly(
   stripeEvent: Stripe.Event,
+  checkoutAttemptId: string,
   sessionId: string,
   outcome: string,
 ): Promise<void> {
@@ -460,8 +832,7 @@ async function recordEventOnly(
     await dynamoDb.send(
       new PutItemCommand({
         TableName:
-          env
-            .STRIPE_EVENT_TABLE_NAME,
+          stripeEventTableName,
 
         Item: {
           eventId: {
@@ -482,6 +853,11 @@ async function recordEventOnly(
             S:
               new Date()
                 .toISOString(),
+          },
+
+          checkoutAttemptId: {
+            S:
+              checkoutAttemptId,
           },
 
           checkoutSessionId: {
@@ -517,8 +893,7 @@ async function getEntitlement(
     await dynamoDb.send(
       new GetItemCommand({
         TableName:
-          env
-            .ENTITLEMENT_TABLE_NAME,
+          entitlementTableName,
 
         Key: {
           userId: {
@@ -534,7 +909,8 @@ async function getEntitlement(
             "version",
         },
 
-        ConsistentRead: true,
+        ConsistentRead:
+          true,
       }),
     );
 
@@ -556,17 +932,15 @@ async function getEntitlement(
 
   if (
     !accessUntil ||
-    !versionText
+    !versionText ||
+    !isCanonicalIsoTimestamp(
+      accessUntil,
+    )
   ) {
     throw new Error(
       "Invalid entitlement record.",
     );
   }
-
-  const accessUntilMs =
-    Date.parse(
-      accessUntil,
-    );
 
   const version =
     Number(
@@ -574,9 +948,6 @@ async function getEntitlement(
     );
 
   if (
-    !Number.isFinite(
-      accessUntilMs,
-    ) ||
     !Number.isSafeInteger(
       version,
     ) ||
@@ -603,15 +974,24 @@ function calculateGrantPeriod(
   entitlement:
     EntitlementSnapshot,
   accessDays: number,
-  grantRequestedAt:
+  paidAt:
     Date,
 ) {
-  const nowMs =
-    grantRequestedAt
-      .getTime();
+  const paidAtMs =
+    paidAt.getTime();
+
+  if (
+    !Number.isFinite(
+      paidAtMs,
+    )
+  ) {
+    throw new Error(
+      "Invalid payment timestamp.",
+    );
+  }
 
   let baseMs =
-    nowMs;
+    paidAtMs;
 
   if (
     entitlement.exists &&
@@ -625,7 +1005,7 @@ function calculateGrantPeriod(
 
     if (
       currentUntilMs >
-      nowMs
+      paidAtMs
     ) {
       baseMs =
         currentUntilMs;
@@ -636,6 +1016,16 @@ function calculateGrantPeriod(
     baseMs +
     accessDays *
       MILLISECONDS_PER_DAY;
+
+  if (
+    !Number.isFinite(
+      untilMs,
+    )
+  ) {
+    throw new Error(
+      "Invalid entitlement grant period.",
+    );
+  }
 
   return {
     grantedFrom:
@@ -670,7 +1060,8 @@ async function itemExists(
         ProjectionExpression:
           keyName,
 
-        ConsistentRead: true,
+        ConsistentRead:
+          true,
       }),
     );
 
@@ -688,31 +1079,52 @@ async function grantOneTimeAccess(
 > {
   const {
     session,
-    userId,
-    stripeCustomerId,
-    planCode,
-    termsVersion,
-    privacyVersion,
+    attempt,
   } =
     checkout;
 
-  const plan =
-    BILLING_PLANS[
-      planCode
-    ];
+  if (
+    attempt.status === "PAID"
+  ) {
+    const purchaseAlreadyExists =
+      await itemExists(
+        billingPurchaseTableName,
+        "stripeCheckoutSessionId",
+        session.id,
+      );
 
-  const grantRequestedAt =
-    new Date();
+    if (purchaseAlreadyExists) {
+      return "duplicate";
+    }
+
+    throw new Error(
+      "CheckoutAttempt is PAID but BillingPurchase is missing.",
+    );
+  }
+
+  const paidAt =
+    new Date(
+      stripeEvent.created *
+        1000,
+    );
+
+  const paidAtIso =
+    paidAt.toISOString();
+
+  const paymentIntentId =
+    getPaymentIntentId(
+      session,
+    );
 
   for (
-    let attempt = 0;
-    attempt <
+    let retry = 0;
+    retry <
       MAX_ENTITLEMENT_RETRIES;
-    attempt += 1
+    retry += 1
   ) {
     const entitlement =
       await getEntitlement(
-        userId,
+        attempt.userId,
       );
 
     const {
@@ -721,20 +1133,15 @@ async function grantOneTimeAccess(
     } =
       calculateGrantPeriod(
         entitlement,
-        plan.accessDays,
-        grantRequestedAt,
+        attempt.accessDays,
+        paidAt,
       );
 
     const processedAt =
       new Date()
         .toISOString();
 
-    const paymentIntentId =
-      getPaymentIntentId(
-        session,
-      );
-
-    const values:
+    const entitlementValues:
       Record<
         string,
         AttributeValue
@@ -770,16 +1177,16 @@ async function grantOneTimeAccess(
         },
       };
 
-    let condition:
+    let entitlementCondition:
       string;
 
     if (
       entitlement.exists
     ) {
-      condition =
+      entitlementCondition =
         "#version = :expectedVersion";
 
-      values[
+      entitlementValues[
         ":expectedVersion"
       ] = {
         N: String(
@@ -787,7 +1194,7 @@ async function grantOneTimeAccess(
         ),
       };
     } else {
-      condition =
+      entitlementCondition =
         "attribute_not_exists(userId)";
     }
 
@@ -798,8 +1205,7 @@ async function grantOneTimeAccess(
             {
               Put: {
                 TableName:
-                  env
-                    .STRIPE_EVENT_TABLE_NAME,
+                  stripeEventTableName,
 
                 Item: {
                   eventId: {
@@ -824,6 +1230,12 @@ async function grantOneTimeAccess(
                       processedAt,
                   },
 
+                  checkoutAttemptId: {
+                    S:
+                      attempt
+                        .checkoutAttemptId,
+                  },
+
                   checkoutSessionId: {
                     S:
                       session.id,
@@ -843,8 +1255,7 @@ async function grantOneTimeAccess(
             {
               Put: {
                 TableName:
-                  env
-                    .BILLING_PURCHASE_TABLE_NAME,
+                  billingPurchaseTableName,
 
                 Item: {
                   stripeCheckoutSessionId:
@@ -853,47 +1264,66 @@ async function grantOneTimeAccess(
                         session.id,
                     },
 
+                  checkoutAttemptId: {
+                    S:
+                      attempt
+                        .checkoutAttemptId,
+                  },
+
                   userId: {
                     S:
-                      userId,
+                      attempt.userId,
                   },
 
                   stripeCustomerId: {
                     S:
-                      stripeCustomerId,
+                      attempt
+                        .stripeCustomerId,
+                  },
+
+                  stripePaymentIntentId: {
+                    S:
+                      paymentIntentId,
                   },
 
                   planCode: {
                     S:
-                      planCode,
+                      attempt.planCode,
+                  },
+
+                  billingContractVersion: {
+                    S:
+                      attempt
+                        .billingContractVersion,
+                  },
+
+                  stripePriceId: {
+                    S:
+                      attempt
+                        .stripePriceId,
                   },
 
                   amountTotal: {
                     N: String(
-                      session
-                        .amount_total,
+                      attempt
+                        .amountTotal,
                     ),
                   },
 
                   currency: {
                     S:
-                      session
-                        .currency ??
-                      "",
+                      attempt.currency,
                   },
 
                   paidAt: {
                     S:
-                      new Date(
-                        stripeEvent
-                          .created *
-                          1000,
-                      ).toISOString(),
+                      paidAtIso,
                   },
 
                   accessDays: {
                     N: String(
-                      plan.accessDays,
+                      attempt
+                        .accessDays,
                     ),
                   },
 
@@ -914,23 +1344,38 @@ async function grantOneTimeAccess(
 
                   termsVersion: {
                     S:
-                      termsVersion,
+                      attempt
+                        .termsVersion,
                   },
 
                   privacyVersion: {
                     S:
-                      privacyVersion,
+                      attempt
+                        .privacyVersion,
                   },
 
-                  ...(paymentIntentId
-                    ? {
-                        stripePaymentIntentId:
-                          {
-                            S:
-                              paymentIntentId,
-                          },
-                      }
-                    : {}),
+                  checkoutConsentVersion: {
+                    S:
+                      attempt
+                        .checkoutConsentVersion,
+                  },
+
+                  immediateDeliveryConsent: {
+                    BOOL:
+                      true,
+                  },
+
+                  withdrawalRightLossAcknowledged:
+                    {
+                      BOOL:
+                        true,
+                    },
+
+                  consentedAt: {
+                    S:
+                      attempt
+                        .consentedAt,
+                  },
                 },
 
                 ConditionExpression:
@@ -941,13 +1386,12 @@ async function grantOneTimeAccess(
             {
               Update: {
                 TableName:
-                  env
-                    .ENTITLEMENT_TABLE_NAME,
+                  entitlementTableName,
 
                 Key: {
                   userId: {
                     S:
-                      userId,
+                      attempt.userId,
                   },
                 },
 
@@ -961,7 +1405,7 @@ async function grantOneTimeAccess(
                   "REMOVE revokedAt, revocationReason",
 
                 ConditionExpression:
-                  condition,
+                  entitlementCondition,
 
                 ExpressionAttributeNames: {
                   "#source":
@@ -971,7 +1415,144 @@ async function grantOneTimeAccess(
                 },
 
                 ExpressionAttributeValues:
-                  values,
+                  entitlementValues,
+              },
+            },
+
+            {
+              Update: {
+                TableName:
+                  checkoutAttemptTableName,
+
+                Key: {
+                  checkoutAttemptId: {
+                    S:
+                      attempt
+                        .checkoutAttemptId,
+                  },
+                },
+
+                UpdateExpression:
+                  "SET #status = :paidStatus, " +
+                  "stripeCheckoutSessionId = :sessionId, " +
+                  "paidAt = :paidAt, " +
+                  "updatedAt = :processedAt",
+
+                ConditionExpression:
+                  "#status = :createdStatus AND " +
+                  "userId = :userId AND " +
+                  "stripeCustomerId = :stripeCustomerId AND " +
+                  "planCode = :planCode AND " +
+                  "billingContractVersion = :billingContractVersion AND " +
+                  "stripePriceId = :stripePriceId AND " +
+                  "amountTotal = :amountTotal AND " +
+                  "currency = :currency AND " +
+                  "checkoutMode = :checkoutMode AND " +
+                  "accessDays = :accessDays AND " +
+                  "termsVersion = :termsVersion AND " +
+                  "privacyVersion = :privacyVersion AND " +
+                  "checkoutConsentVersion = :checkoutConsentVersion AND " +
+                  "immediateDeliveryConsent = :trueValue AND " +
+                  "withdrawalRightLossAcknowledged = :trueValue",
+
+                ExpressionAttributeNames: {
+                  "#status":
+                    "status",
+                },
+
+                ExpressionAttributeValues: {
+                  ":paidStatus": {
+                    S: "PAID",
+                  },
+
+                  ":createdStatus": {
+                    S: "CREATED",
+                  },
+
+                  ":sessionId": {
+                    S: session.id,
+                  },
+
+                  ":paidAt": {
+                    S: paidAtIso,
+                  },
+
+                  ":processedAt": {
+                    S: processedAt,
+                  },
+
+                  ":userId": {
+                    S: attempt.userId,
+                  },
+
+                  ":stripeCustomerId": {
+                    S:
+                      attempt
+                        .stripeCustomerId,
+                  },
+
+                  ":planCode": {
+                    S: attempt.planCode,
+                  },
+
+                  ":billingContractVersion": {
+                    S:
+                      attempt
+                        .billingContractVersion,
+                  },
+
+                  ":stripePriceId": {
+                    S:
+                      attempt
+                        .stripePriceId,
+                  },
+
+                  ":amountTotal": {
+                    N: String(
+                      attempt
+                        .amountTotal,
+                    ),
+                  },
+
+                  ":currency": {
+                    S: attempt.currency,
+                  },
+
+                  ":checkoutMode": {
+                    S:
+                      attempt
+                        .checkoutMode,
+                  },
+
+                  ":accessDays": {
+                    N: String(
+                      attempt
+                        .accessDays,
+                    ),
+                  },
+
+                  ":termsVersion": {
+                    S:
+                      attempt
+                        .termsVersion,
+                  },
+
+                  ":privacyVersion": {
+                    S:
+                      attempt
+                        .privacyVersion,
+                  },
+
+                  ":checkoutConsentVersion": {
+                    S:
+                      attempt
+                        .checkoutConsentVersion,
+                  },
+
+                  ":trueValue": {
+                    BOOL: true,
+                  },
+                },
               },
             },
           ],
@@ -991,20 +1572,24 @@ async function grantOneTimeAccess(
       const [
         eventAlreadyExists,
         purchaseAlreadyExists,
+        latestAttempt,
       ] =
         await Promise.all([
           itemExists(
-            env
-              .STRIPE_EVENT_TABLE_NAME,
+            stripeEventTableName,
             "eventId",
             stripeEvent.id,
           ),
 
           itemExists(
-            env
-              .BILLING_PURCHASE_TABLE_NAME,
+            billingPurchaseTableName,
             "stripeCheckoutSessionId",
             session.id,
+          ),
+
+          getCheckoutAttempt(
+            attempt
+              .checkoutAttemptId,
           ),
         ]);
 
@@ -1015,7 +1600,9 @@ async function grantOneTimeAccess(
       }
 
       if (
-        eventAlreadyExists
+        eventAlreadyExists ||
+        latestAttempt.status ===
+          "PAID"
       ) {
         throw new Error(
           "Inconsistent billing transaction state.",
@@ -1023,9 +1610,9 @@ async function grantOneTimeAccess(
       }
 
       /*
-       * Neither idempotency key exists, therefore the most
-       * likely cause is the Entitlement optimistic-lock check.
-       * Re-read and retry.
+       * Neither billing idempotency key exists and the attempt is still
+       * CREATED. The remaining expected conditional conflict is the
+       * Entitlement optimistic lock, so re-read and retry from scratch.
        */
     }
   }
@@ -1124,6 +1711,8 @@ export const handler:
       ) {
         await recordEventOnly(
           stripeEvent,
+          checkout.attempt
+            .checkoutAttemptId,
           checkout.session.id,
           "PAYMENT_PENDING",
         );
@@ -1139,10 +1728,12 @@ export const handler:
 
       if (
         stripeEvent.type ===
-        "checkout.session.async_payment_failed"
+          "checkout.session.async_payment_failed"
       ) {
         await recordEventOnly(
           stripeEvent,
+          checkout.attempt
+            .checkoutAttemptId,
           checkout.session.id,
           "PAYMENT_FAILED",
         );
@@ -1223,6 +1814,10 @@ export const handler:
         );
       }
 
+      /*
+       * Stripe will retry 5xx responses. The API Gateway 5xx alarm in
+       * backend.ts ensures handled failures are still operationally visible.
+       */
       return jsonResponse(
         500,
         {

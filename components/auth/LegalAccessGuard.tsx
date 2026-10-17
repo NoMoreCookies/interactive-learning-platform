@@ -3,7 +3,6 @@
 import {
   type ReactNode,
   useEffect,
-  useState,
 } from "react";
 
 import {
@@ -34,42 +33,35 @@ export default function LegalAccessGuard({
   const router = useRouter();
 
   const {
+    user,
     isAuthenticated,
     isLoading: isAuthLoading,
     isCurrentLegalVerified,
     markCurrentLegalVerified,
   } = useAuth();
 
-  const [
-    isCheckingLegal,
-    setIsCheckingLegal,
-  ] = useState(false);
+  const userId = user?.userId ?? null;
+
+  const isPathAllowed =
+    isAllowedPath(pathname);
+
+  const shouldCheckLegal =
+    !isAuthLoading &&
+    isAuthenticated &&
+    !isPathAllowed &&
+    !isCurrentLegalVerified;
 
   useEffect(() => {
-    if (isAuthLoading) {
-      return;
-    }
-
-    if (!isAuthenticated) {
-      setIsCheckingLegal(false);
-      return;
-    }
-
-    if (isAllowedPath(pathname)) {
-      setIsCheckingLegal(false);
-      return;
-    }
-
-    if (isCurrentLegalVerified) {
-      setIsCheckingLegal(false);
+    if (
+      !shouldCheckLegal ||
+      !userId
+    ) {
       return;
     }
 
     let isCancelled = false;
 
     async function checkLegalAccess() {
-      setIsCheckingLegal(true);
-
       try {
         const requirement =
           await getLegalUpdateRequirement();
@@ -87,19 +79,19 @@ export default function LegalAccessGuard({
         }
 
         markCurrentLegalVerified();
-
-        setIsCheckingLegal(false);
       } catch (error) {
+        if (isCancelled) {
+          return;
+        }
+
         console.error(
           "Failed to verify legal access:",
           error,
         );
 
-        if (!isCancelled) {
-          router.replace(
-            "/auth?legal=required",
-          );
-        }
+        router.replace(
+          "/auth?legal=required",
+        );
       }
     }
 
@@ -109,17 +101,15 @@ export default function LegalAccessGuard({
       isCancelled = true;
     };
   }, [
-    isAuthenticated,
-    isAuthLoading,
-    isCurrentLegalVerified,
+    shouldCheckLegal,
+    userId,
     markCurrentLegalVerified,
-    pathname,
     router,
   ]);
 
   if (
     isAuthLoading ||
-    isCheckingLegal
+    shouldCheckLegal
   ) {
     return null;
   }

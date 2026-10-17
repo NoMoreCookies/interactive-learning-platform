@@ -1,0 +1,246 @@
+.
+├── .gitignore
+├── AGENTS.md
+├── CLAUDE.md
+├── README.md
+├── amplify
+│   ├── auth
+│   │   ├── post-confirmation
+│   │   │   ├── handler.ts
+│   │   │   └── resource.ts
+│   │   ├── pre-sign-up
+│   │   │   ├── handler.ts
+│   │   │   └── resource.ts
+│   │   └── resource.ts
+│   ├── backend.ts
+│   ├── data
+│   │   ├── accept-current-legal
+│   │   │   └── handler.ts
+│   │   ├── checkout-status
+│   │   │   ├── handler.ts
+│   │   │   └── resource.ts
+│   │   ├── create-checkout-session
+│   │   │   ├── handler.ts
+│   │   │   └── resource.ts
+│   │   ├── delete-admin-course
+│   │   │   ├── handler.ts
+│   │   │   └── resource.ts
+│   │   ├── premium-lesson-asset-url
+│   │   │   ├── handler.ts
+│   │   │   └── resource.ts
+│   │   ├── premium-lesson-content
+│   │   │   ├── handler.ts
+│   │   │   └── resource.ts
+│   │   ├── premium-status
+│   │   │   ├── handler.ts
+│   │   │   └── resource.ts
+│   │   ├── public-catalog
+│   │   │   ├── handler.ts
+│   │   │   └── resource.ts
+│   │   ├── public-course-outline
+│   │   │   ├── handler.ts
+│   │   │   └── resource.ts
+│   │   ├── resource.ts
+│   │   ├── task-answer
+│   │   │   ├── handler.ts
+│   │   │   └── resource.ts
+│   │   └── task-solution
+│   │       ├── handler.ts
+│   │       └── resource.ts
+│   ├── functions
+│   │   └── stripe-webhook
+│   │       ├── handler.ts
+│   │       └── resource.ts
+│   ├── package.json
+│   ├── shared
+│   │   ├── billing-plans.ts
+│   │   ├── legal-versions.ts
+│   │   └── premium-access.ts
+│   ├── storage
+│   │   └── resource.ts
+│   └── tsconfig.json
+├── amplify_outputs.json
+├── app
+│   ├── about
+│   │   └── page.tsx
+│   ├── about_me
+│   │   └── page.tsx
+│   ├── account
+│   │   ├── page.tsx
+│   │   └── security
+│   │       └── page.tsx
+│   ├── admin
+│   │   ├── courses
+│   │   │   ├── [courseId]
+│   │   │   │   └── page.tsx
+│   │   │   └── page.tsx
+│   │   ├── layout.tsx
+│   │   ├── lessons
+│   │   │   └── [lessonId]
+│   │   │       └── page.tsx
+│   │   ├── modules
+│   │   │   └── [moduleId]
+│   │   │       └── page.tsx
+│   │   └── page.tsx
+│   ├── auth
+│   │   └── page.tsx
+│   ├── checkout
+│   │   ├── cancel
+│   │   │   └── page.tsx
+│   │   └── success
+│   │       ├── CheckoutSuccessClient.tsx
+│   │       └── page.tsx
+│   ├── confirm
+│   │   └── page.tsx
+│   ├── courses
+│   │   ├── [slug]
+│   │   │   ├── [lessonSlug]
+│   │   │   │   ├── loading.tsx
+│   │   │   │   └── page.tsx
+│   │   │   ├── loading.tsx
+│   │   │   └── page.tsx
+│   │   └── page.tsx
+│   ├── error.tsx
+│   ├── for-whom
+│   │   └── page.tsx
+│   ├── globals.css
+│   ├── icon.png
+│   ├── layout.tsx
+│   ├── loading.tsx
+│   ├── login
+│   │   └── page.tsx
+│   ├── not-found.tsx
+│   ├── page.tsx
+│   ├── privacyPolicy
+│   │   └── page.tsx
+│   ├── register
+│   │   └── page.tsx
+│   └── termsAndConditions
+│       └── page.tsx
+├── components
+│   ├── ConfigureAmplify.tsx
+│   ├── admin
+│   │   ├── AdminSidebar.tsx
+│   │   ├── LessonAssetUploader.tsx
+│   │   ├── course
+│   │   │   ├── CourseCreateForm.tsx
+│   │   │   ├── CourseDeleteDialog.tsx
+│   │   │   ├── CourseList.tsx
+│   │   │   ├── CourseModulesList.tsx
+│   │   │   ├── CourseSettingsForm.tsx
+│   │   │   ├── CourseThumbnailUploader.tsx
+│   │   │   ├── ModuleCreateForm.tsx
+│   │   │   └── types.ts
+│   │   ├── lesson
+│   │   │   ├── LessonNotesSection.tsx
+│   │   │   ├── LessonSettingsForm.tsx
+│   │   │   ├── LessonStatusCards.tsx
+│   │   │   ├── LessonTasksSection.tsx
+│   │   │   └── types.ts
+│   │   └── module
+│   │       ├── LessonCreateForm.tsx
+│   │       ├── ModuleLessonsList.tsx
+│   │       ├── ModuleSettingsForm.tsx
+│   │       └── types.ts
+│   ├── auth
+│   │   ├── AdminGuard.tsx
+│   │   ├── AuthPanel.tsx
+│   │   ├── AuthProvider.tsx
+│   │   ├── AuthSidebar.tsx
+│   │   ├── ConfirmSignUpForm.tsx
+│   │   ├── LegalAccessGuard.tsx
+│   │   ├── LegalUpdateModal.tsx
+│   │   ├── LoginForm.tsx
+│   │   ├── RegisterForm.tsx
+│   │   ├── ResetPasswordForm.tsx
+│   │   ├── TotpSetupCard.tsx
+│   │   └── VerificationCodeInput.tsx
+│   ├── courses
+│   │   ├── CategoryBackground.tsx
+│   │   ├── CourseCard.tsx
+│   │   ├── CourseModuleAccordion.tsx
+│   │   └── CourseThumbnail.tsx
+│   ├── home
+│   │   └── HomeHero.tsx
+│   ├── landing
+│   │   └── LearningOrb.tsx
+│   ├── layout
+│   │   ├── Footer.tsx
+│   │   └── Navbar.tsx
+│   ├── lessons
+│   │   ├── LatexContent.tsx
+│   │   ├── LessonNavigation.tsx
+│   │   ├── LessonNotes.tsx
+│   │   └── LessonTasks.tsx
+│   └── ui
+│       ├── Button.tsx
+│       ├── FilePicker.tsx
+│       ├── FormField.tsx
+│       ├── Input.tsx
+│       ├── PageContainer.tsx
+│       ├── PageHeader.tsx
+│       ├── Select.tsx
+│       ├── StatusMessage.tsx
+│       ├── Surface.tsx
+│       ├── Textarea.tsx
+│       ├── UploadProgress.tsx
+│       └── index.ts
+├── eslint.config.mjs
+├── lib
+│   ├── amplify-client.ts
+│   ├── amplify-config.ts
+│   ├── auth.ts
+│   ├── config
+│   │   ├── category-backgrounds.ts
+│   │   └── course-options.ts
+│   ├── legal-acceptance-id.ts
+│   ├── legal-acceptance.ts
+│   ├── legal.ts
+│   ├── services
+│   │   ├── admin-service.ts
+│   │   ├── billing-service.ts
+│   │   ├── course-service.ts
+│   │   ├── lesson-service.ts
+│   │   └── storage-service.ts
+│   └── utils
+│       ├── cn.ts
+│       ├── course-values.ts
+│       ├── create-slug.ts
+│       └── sort-by-order.ts
+├── next-env.d.ts
+├── next.config.ts
+├── package-lock.json
+├── package.json
+├── postcss.config.mjs
+├── project-tree.txt
+├── proxy.ts
+├── public
+│   ├── book-icon.png
+│   ├── categories
+│   │   ├── backgrounds
+│   │   │   ├── computer_science.png
+│   │   │   ├── mathematics.png
+│   │   │   └── physics.png
+│   │   ├── computer-science-3d.png
+│   │   ├── mathematics-3d.png
+│   │   └── physics-3d.png
+│   ├── courses
+│   │   └── matematyka-rozszerzona
+│   │       ├── math-extended-left.svg
+│   │       └── math-extended-right.svg
+│   ├── cursors
+│   │   ├── c1.svg
+│   │   └── c2.svg
+│   ├── file.svg
+│   ├── globe.svg
+│   ├── hero
+│   │   └── futuristic-book.png
+│   ├── me
+│   │   └── me.jpg
+│   ├── next.svg
+│   ├── vercel.svg
+│   └── window.svg
+├── tsconfig.json
+└── tsconfig.tsbuildinfo
+
+70 directories, 174 files

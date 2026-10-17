@@ -11,7 +11,9 @@ import CourseCreateForm, {
 } from "@/components/admin/course/CourseCreateForm";
 import CourseList from "@/components/admin/course/CourseList";
 
-import type { AdminCourseListItem } from "@/components/admin/course/types";
+import type {
+  AdminCourseListItem,
+} from "@/components/admin/course/types";
 
 import {
   PageHeader,
@@ -20,25 +22,33 @@ import {
 
 import {
   createAdminCourse,
+  deleteAdminCourse,
   getAdminCourses,
 } from "@/lib/services/admin-service";
 
-import { createSlug } from "@/lib/utils/create-slug";
+import {
+  createSlug,
+} from "@/lib/utils/create-slug";
 
 export default function AdminCoursesPage() {
   const [courses, setCourses] =
-    useState<AdminCourseListItem[]>([]);
+    useState<
+      AdminCourseListItem[]
+    >([]);
 
   const [
     statusMessage,
     setStatusMessage,
-  ] = useState("");
+  ] =
+    useState("");
 
   const [
     statusTone,
     setStatusTone,
   ] = useState<
-    "info" | "success" | "error"
+    "info" |
+    "success" |
+    "error"
   >("info");
 
   const [isLoading, setIsLoading] =
@@ -46,6 +56,14 @@ export default function AdminCoursesPage() {
 
   const [isSaving, setIsSaving] =
     useState(false);
+
+  const [
+    deletingCourseId,
+    setDeletingCourseId,
+  ] =
+    useState<
+      string | null
+    >(null);
 
   const loadCourses =
     useCallback(async () => {
@@ -55,7 +73,9 @@ export default function AdminCoursesPage() {
         const result =
           await getAdminCourses();
 
-        setCourses(result);
+        setCourses(
+          result,
+        );
       } catch (error) {
         console.error(
           "Failed to load admin courses.",
@@ -65,9 +85,13 @@ export default function AdminCoursesPage() {
         setStatusMessage(
           "Nie udało się pobrać kursów.",
         );
-        setStatusTone("error");
+        setStatusTone(
+          "error",
+        );
       } finally {
-        setIsLoading(false);
+        setIsLoading(
+          false,
+        );
       }
     }, []);
 
@@ -78,14 +102,21 @@ export default function AdminCoursesPage() {
   async function handleCreateCourse(
     input: CreateCourseInput,
   ): Promise<boolean> {
-    const title = input.title.trim();
-    const slug = createSlug(title);
+    const title =
+      input.title.trim();
+
+    const slug =
+      createSlug(
+        title,
+      );
 
     if (!title) {
       setStatusMessage(
         "Podaj nazwę kursu.",
       );
-      setStatusTone("error");
+      setStatusTone(
+        "error",
+      );
       return false;
     }
 
@@ -93,12 +124,18 @@ export default function AdminCoursesPage() {
       setStatusMessage(
         "Nie udało się utworzyć poprawnego slugu kursu.",
       );
-      setStatusTone("error");
+      setStatusTone(
+        "error",
+      );
       return false;
     }
 
-    setIsSaving(true);
-    setStatusMessage("");
+    setIsSaving(
+      true,
+    );
+    setStatusMessage(
+      "",
+    );
 
     try {
       await createAdminCourse({
@@ -106,16 +143,22 @@ export default function AdminCoursesPage() {
         slug,
         description:
           input.description.trim(),
-        subject: input.subject,
-        level: input.level,
-        order: courses.length + 1,
-        published: false,
+        subject:
+          input.subject,
+        level:
+          input.level,
+        order:
+          courses.length + 1,
+        published:
+          false,
       });
 
       setStatusMessage(
         "Kurs został utworzony.",
       );
-      setStatusTone("success");
+      setStatusTone(
+        "success",
+      );
 
       await loadCourses();
       return true;
@@ -126,10 +169,82 @@ export default function AdminCoursesPage() {
           "Nie udało się utworzyć kursu.",
         ),
       );
-      setStatusTone("error");
+      setStatusTone(
+        "error",
+      );
       return false;
     } finally {
-      setIsSaving(false);
+      setIsSaving(
+        false,
+      );
+    }
+  }
+
+  async function handleDeleteCourse(
+    courseId: string,
+    confirmationSlug: string,
+  ): Promise<boolean> {
+    if (
+      deletingCourseId !==
+      null
+    ) {
+      return false;
+    }
+
+    setDeletingCourseId(
+      courseId,
+    );
+    setStatusMessage(
+      "",
+    );
+
+    try {
+      const result =
+        await deleteAdminCourse({
+          courseId,
+          confirmationSlug,
+        });
+
+      if (
+        result.status ===
+        "ALREADY_DELETED"
+      ) {
+        setStatusMessage(
+          "Kurs był już usunięty.",
+        );
+      } else {
+        setStatusMessage(
+          [
+            "Kurs został usunięty.",
+            `Moduły: ${result.deletedModules}.`,
+            `Lekcje: ${result.deletedLessons}.`,
+            `Notatki: ${result.deletedNotes}.`,
+            `Zadania: ${result.deletedTasks}.`,
+          ].join(" "),
+        );
+      }
+
+      setStatusTone(
+        "success",
+      );
+
+      await loadCourses();
+      return true;
+    } catch (error) {
+      setStatusMessage(
+        getErrorMessage(
+          error,
+          "Nie udało się usunąć kursu.",
+        ),
+      );
+      setStatusTone(
+        "error",
+      );
+      return false;
+    } finally {
+      setDeletingCourseId(
+        null,
+      );
     }
   }
 
@@ -158,15 +273,27 @@ export default function AdminCoursesPage() {
 
           <div className="mt-5">
             <CourseList
-              courses={courses}
-              isLoading={isLoading}
+              courses={
+                courses
+              }
+              isLoading={
+                isLoading
+              }
+              deletingCourseId={
+                deletingCourseId
+              }
+              onDelete={
+                handleDeleteCourse
+              }
             />
           </div>
         </section>
 
         <CourseCreateForm
           isSaving={isSaving}
-          onCreate={handleCreateCourse}
+          onCreate={
+            handleCreateCourse
+          }
         />
       </div>
     </main>
