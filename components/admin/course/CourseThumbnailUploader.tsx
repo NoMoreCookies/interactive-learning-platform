@@ -335,14 +335,15 @@ export default function CourseThumbnailUploader({
           selectedFile,
         );
 
-      if (validation.error) {
-        setFile(null);
-        setStatusMessage(
-          validation.error,
-        );
-        event.target.value = "";
-        return;
-      }
+    if (validation.error !== null) {
+      setFile(null);
+      setStatusMessage(validation.error);
+      event.target.value = "";
+      return;
+    }
+
+    setFile(selectedFile);
+    setSelectedDimensions(validation.dimensions);
 
       setFile(selectedFile);
       setSelectedDimensions(

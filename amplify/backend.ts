@@ -17,6 +17,7 @@ import {
 import {
   CfnOutput,
   Duration,
+  RemovalPolicy,
 } from "aws-cdk-lib";
 
 import {
@@ -1272,6 +1273,85 @@ backend.premiumStatus.addEnvironment(
   "ENTITLEMENT_TABLE_NAME",
   entitlementTable.tableName,
 );
+
+/*
+ * Private customer complaint storage.
+ *
+ * Complaint records are not exposed as Amplify Data models.
+ * Access is mediated exclusively by dedicated Lambda functions.
+ *
+ * The table is retained if its CloudFormation stack is removed,
+ * protecting complaint history against accidental deletion.
+ */
+const complaintsStack =
+  backend.createStack("complaints");
+
+const complaintTable = new Table(
+  complaintsStack,
+  "ComplaintTable",
+  {
+    partitionKey: {
+      name: "complaintId",
+      type: AttributeType.STRING,
+    },
+
+    billingMode:
+      BillingMode.PAY_PER_REQUEST,
+
+    pointInTimeRecoverySpecification: {
+      pointInTimeRecoveryEnabled: true,
+    },
+
+    removalPolicy:
+      RemovalPolicy.RETAIN,
+  },
+);
+
+/*
+ * Customer complaint history.
+ *
+ * Access pattern:
+ * userId -> complaints ordered by createdAt.
+ */
+complaintTable.addGlobalSecondaryIndex({
+  indexName: "userId-createdAt-index",
+
+  partitionKey: {
+    name: "userId",
+    type: AttributeType.STRING,
+  },
+
+  sortKey: {
+    name: "createdAt",
+    type: AttributeType.STRING,
+  },
+
+  projectionType:
+    ProjectionType.KEYS_ONLY,
+});
+
+/*
+ * Administrative complaint queue.
+ *
+ * Access pattern:
+ * status -> complaints ordered by createdAt.
+ */
+complaintTable.addGlobalSecondaryIndex({
+  indexName: "status-createdAt-index",
+
+  partitionKey: {
+    name: "status",
+    type: AttributeType.STRING,
+  },
+
+  sortKey: {
+    name: "createdAt",
+    type: AttributeType.STRING,
+  },
+
+  projectionType:
+    ProjectionType.KEYS_ONLY,
+});
 
 /*
  * Operational monitoring.
