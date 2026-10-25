@@ -9,9 +9,20 @@ import {
   postConfirmation,
 } from "../auth/post-confirmation/resource";
 
+import { createComplaint } from "./create-complaint/resource";
+import { getMyComplaints } from "./get-my-complaints/resource";
+import { getMyPurchases } from "./get-my-purchases/resource";
+import { adminListComplaints } from "./admin-list-complaints/resource";
+import { adminResolveComplaint } from "./admin-resolve-complaint/resource";
+
 import {
   checkoutStatus,
 } from "./checkout-status/resource";
+
+import {
+  adminInitiateRefund,
+} from "./admin-initiate-refund/resource";
+import { adminReconcileRefund } from "./admin-reconcile-refund/resource";
 
 import {
   createCheckoutSession,
@@ -185,6 +196,57 @@ const schema = a
             "PublicModule",
           )
           .array(),
+    }),
+
+    /*
+     * Complaint DTO: never expose ADMIN's Cognito identifier to customers.
+     * Protected via the per-operation auth rules and Lambda ownership checks.
+     */
+    ComplaintView: a.customType({
+      complaintId: a.string().required(),
+      stripeCheckoutSessionId: a.string().required(),
+      userId: a.string().required(),
+      subject: a.string().required(),
+      description: a.string().required(),
+      status: a.string().required(),
+      createdAt: a.string().required(),
+      updatedAt: a.string().required(),
+      decisionReason: a.string(),
+      decidedAt: a.string(),
+    }),
+    ComplaintSubmissionResult: a.customType({
+      complaintId: a.string().required(),
+      status: a.string().required(),
+      createdAt: a.string().required(),
+    }),
+    ComplaintListResult: a.customType({
+      items: a.ref("ComplaintView").array().required(),
+      nextToken: a.string(),
+    }),
+    AdminResolveComplaintResult: a.customType({
+      complaintId: a.string().required(),
+      status: a.string().required(),
+      decidedAt: a.string().required(),
+    }),
+    MyPurchaseView: a.customType({
+      stripeCheckoutSessionId: a.string().required(),
+      paidAt: a.string().required(),
+      amountTotal: a.integer().required(),
+      currency: a.string().required(),
+      grantedUntil: a.string(),
+    }),
+    MyPurchasesResult: a.customType({
+      items: a.ref("MyPurchaseView").array().required(),
+      nextToken: a.string(),
+    }),
+
+    /*
+     * C1 refund submission result. Not an acknowledgement that funds
+     * were returned; the status is reconciled independently in C2.
+     */
+    AdminInitiateRefundResult: a.customType({
+      status: a.string().required(),
+      stripeRefundId: a.string(),
     }),
 
     /*
@@ -419,6 +481,75 @@ createCheckoutSession: a
           deleteAdminCourse,
         ),
       ),
+
+    /*
+     * Package B - Complaints, separate from Stripe refund processing.
+     * Identity and resource ownership are checked again inside Lambda.
+     */
+    createComplaint: a.mutation()
+      .arguments({
+        stripeCheckoutSessionId: a.string().required(),
+        submissionId: a.string().required(),
+        subject: a.string().required(),
+        description: a.string().required(),
+      })
+      .returns(a.ref("ComplaintSubmissionResult"))
+      .authorization((allow) => [allow.authenticated()])
+      .handler(a.handler.function(createComplaint)),
+
+    getMyComplaints: a.query()
+      .arguments({ nextToken: a.string() })
+      .returns(a.ref("ComplaintListResult"))
+      .authorization((allow) => [allow.authenticated()])
+      .handler(a.handler.function(getMyComplaints)),
+
+    getMyPurchases: a.query()
+      .arguments({ nextToken: a.string() })
+      .returns(a.ref("MyPurchasesResult"))
+      .authorization((allow) => [allow.authenticated()])
+      .handler(a.handler.function(getMyPurchases)),
+
+    adminListComplaints: a.query()
+      .arguments({ status: a.string().required(), nextToken: a.string() })
+      .returns(a.ref("ComplaintListResult"))
+      .authorization((allow) => [allow.group("ADMIN")])
+      .handler(a.handler.function(adminListComplaints)),
+
+    adminResolveComplaint: a.mutation()
+      .arguments({
+        complaintId: a.string().required(),
+        decision: a.string().required(),
+        decisionReason: a.string().required(),
+      })
+      .returns(a.ref("AdminResolveComplaintResult"))
+      .authorization((allow) => [allow.group("ADMIN")])
+      .handler(a.handler.function(adminResolveComplaint)),
+
+    /*
+     * Financially sensitive, ADMIN-only C1 mutation.
+     * A separate backend group/identity check is mandatory.
+     * REFUND_EXECUTION_ENABLED remains false until C2/C3.
+     */
+    adminInitiateRefund: a
+      .mutation()
+      .arguments({
+        complaintId: a.string().required(),
+        stripeCheckoutSessionId: a.string().required(),
+        confirmationSessionId: a.string().required(),
+      })
+      .returns(a.ref("AdminInitiateRefundResult"))
+      .authorization((allow) => [allow.group("ADMIN")])
+      .handler(a.handler.function(adminInitiateRefund)),
+
+    /* ADMIN-only Stripe GET reconciliation; no new refund is issued. */
+    adminReconcileRefund: a
+      .mutation()
+      .arguments({
+        stripeCheckoutSessionId: a.string().required(),
+      })
+      .returns(a.ref("AdminInitiateRefundResult"))
+      .authorization((allow) => [allow.group("ADMIN")])
+      .handler(a.handler.function(adminReconcileRefund)),
 
     /*
      * Returns the current authenticated user's Premium status.

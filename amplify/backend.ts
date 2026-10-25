@@ -2,9 +2,21 @@ import {
   defineBackend,
 } from "@aws-amplify/backend";
 
+import { createComplaint } from "./data/create-complaint/resource";
+import { getMyComplaints } from "./data/get-my-complaints/resource";
+import { getMyPurchases } from "./data/get-my-purchases/resource";
+import { adminListComplaints } from "./data/admin-list-complaints/resource";
+import { adminResolveComplaint } from "./data/admin-resolve-complaint/resource";
+
 import {
   checkoutStatus,
 } from "./data/checkout-status/resource";
+
+import {
+  adminInitiateRefund,
+} from "./data/admin-initiate-refund/resource";
+
+import { adminReconcileRefund } from "./data/admin-reconcile-refund/resource";
 
 import {
   stripeWebhook,
@@ -124,6 +136,13 @@ const backend = defineBackend({
   stripeWebhook,
   premiumStatus,
   checkoutStatus,
+  adminInitiateRefund,
+  adminReconcileRefund,
+  createComplaint,
+  getMyComplaints,
+  getMyPurchases,
+  adminListComplaints,
+  adminResolveComplaint,
 });
 // Enable point-in-time recovery for persistent application data.
 // PITR protects against accidental writes and deletes by allowing
@@ -862,6 +881,28 @@ const billingPurchaseTable =
   );
 
 /*
+ * Immutable claim boundary for a full refund of one Checkout Session.
+ *
+ * C1 has a persistent record before any external Stripe call. It is
+ * intentionally NOT exposed as an Amplify Data model.
+ */
+const billingRefundTable = new Table(
+  billingStack,
+  "BillingRefundTable",
+  {
+    partitionKey: {
+      name: "stripeCheckoutSessionId",
+      type: AttributeType.STRING,
+    },
+    billingMode: BillingMode.PAY_PER_REQUEST,
+    pointInTimeRecoverySpecification: {
+      pointInTimeRecoveryEnabled: true,
+    },
+    removalPolicy: RemovalPolicy.RETAIN,
+  },
+);
+
+/*
  * Checkout completion status.
  *
  * Read-only access to a purchase by Checkout Session ID.
@@ -1198,6 +1239,21 @@ backend.stripeWebhook.addEnvironment(
   entitlementTable.tableName,
 );
 
+/* Signed refund events reuse the webhook ingress and StripeEvent idempotency.
+ * The original paid Checkout path keeps its exact existing permissions.
+ */
+billingRefundTable.grant(
+  backend.stripeWebhook.resources.lambda,
+  "dynamodb:GetItem",
+  "dynamodb:UpdateItem",
+);
+backend.stripeWebhook.resources.lambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:Query"],
+  resources: [`${billingPurchaseTable.tableArn}/index/userId-index`],
+}));
+backend.stripeWebhook.addEnvironment("BILLING_REFUND_TABLE_NAME", billingRefundTable.tableName);
+
+
 /*
  * Premium authorization boundary.
  *
@@ -1352,6 +1408,118 @@ complaintTable.addGlobalSecondaryIndex({
   projectionType:
     ProjectionType.KEYS_ONLY,
 });
+
+/*
+ * Package B - Complaint application layer.
+ *
+ * No frontend or authenticated user receives DynamoDB credentials.
+ * Each Lambda gets only its exact table and GSI permissions.
+ * There is intentionally no monthly or per-user complaint quota.
+ * Idempotency prevents duplicates from network retries only.
+ */
+const complaintsCreateLambda = backend.createComplaint.resources.lambda;
+complaintTable.grant(complaintsCreateLambda, "dynamodb:PutItem", "dynamodb:GetItem");
+billingPurchaseTable.grant(complaintsCreateLambda, "dynamodb:GetItem");
+backend.createComplaint.addEnvironment("COMPLAINT_TABLE_NAME", complaintTable.tableName);
+backend.createComplaint.addEnvironment("BILLING_PURCHASE_TABLE_NAME", billingPurchaseTable.tableName);
+
+const complaintsReadLambda = backend.getMyComplaints.resources.lambda;
+complaintTable.grant(complaintsReadLambda, "dynamodb:GetItem");
+complaintsReadLambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:Query"],
+  resources: [`${complaintTable.tableArn}/index/userId-createdAt-index`],
+}));
+backend.getMyComplaints.addEnvironment("COMPLAINT_TABLE_NAME", complaintTable.tableName);
+
+const purchasesReadLambda = backend.getMyPurchases.resources.lambda;
+billingPurchaseTable.grant(purchasesReadLambda, "dynamodb:GetItem");
+purchasesReadLambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:Query"],
+  resources: [`${billingPurchaseTable.tableArn}/index/userId-index`],
+}));
+backend.getMyPurchases.addEnvironment("BILLING_PURCHASE_TABLE_NAME", billingPurchaseTable.tableName);
+
+const complaintsAdminListLambda = backend.adminListComplaints.resources.lambda;
+complaintTable.grant(complaintsAdminListLambda, "dynamodb:GetItem");
+complaintsAdminListLambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:Query"],
+  resources: [`${complaintTable.tableArn}/index/status-createdAt-index`],
+}));
+backend.adminListComplaints.addEnvironment("COMPLAINT_TABLE_NAME", complaintTable.tableName);
+
+const complaintsAdminResolveLambda = backend.adminResolveComplaint.resources.lambda;
+complaintTable.grant(complaintsAdminResolveLambda, "dynamodb:UpdateItem");
+backend.adminResolveComplaint.addEnvironment("COMPLAINT_TABLE_NAME", complaintTable.tableName);
+
+/*
+ * C1 refund coordinator, gated off until the signed refund webhook,
+ * reconciliation and correct Entitlement recalculation exist.
+ *
+ * Two read-only transactional condition checks prevent races with
+ * complaints/purchases. Only the private refund record can be written.
+ * The Lambda has no access to Entitlement or raw user records.
+ */
+const refundLambda =
+  backend.adminInitiateRefund.resources.lambda;
+
+complaintTable.grant(
+  refundLambda,
+  "dynamodb:GetItem",
+);
+
+billingPurchaseTable.grant(
+  refundLambda,
+  "dynamodb:GetItem",
+);
+
+billingRefundTable.grant(
+  refundLambda,
+  "dynamodb:GetItem",
+  "dynamodb:PutItem",
+  "dynamodb:UpdateItem",
+);
+
+refundLambda.addToRolePolicy(
+  new PolicyStatement({
+    actions: ["dynamodb:ConditionCheckItem"],
+    resources: [
+      complaintTable.tableArn,
+      billingPurchaseTable.tableArn,
+    ],
+  }),
+);
+
+backend.adminInitiateRefund.addEnvironment(
+  "COMPLAINT_TABLE_NAME",
+  complaintTable.tableName,
+);
+backend.adminInitiateRefund.addEnvironment(
+  "BILLING_PURCHASE_TABLE_NAME",
+  billingPurchaseTable.tableName,
+);
+backend.adminInitiateRefund.addEnvironment(
+  "BILLING_REFUND_TABLE_NAME",
+  billingRefundTable.tableName,
+);
+
+/* Administrative recovery never calls Stripe refund creation. A private
+ * Lambda reads the Stripe refund and runs the SAME transactional reconciler
+ * as the signed webhook, so both paths obey one entitlement invariant.
+ */
+const reconcileLambda = backend.adminReconcileRefund.resources.lambda;
+billingRefundTable.grant(reconcileLambda, "dynamodb:GetItem", "dynamodb:UpdateItem");
+billingPurchaseTable.grant(reconcileLambda, "dynamodb:GetItem");
+entitlementTable.grant(reconcileLambda, "dynamodb:GetItem", "dynamodb:UpdateItem");
+stripeEventTable.grant(reconcileLambda, "dynamodb:PutItem");
+reconcileLambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:Query"],
+  resources: [`${billingPurchaseTable.tableArn}/index/userId-index`],
+}));
+backend.adminReconcileRefund.addEnvironment("BILLING_REFUND_TABLE_NAME", billingRefundTable.tableName);
+backend.adminReconcileRefund.addEnvironment("BILLING_PURCHASE_TABLE_NAME", billingPurchaseTable.tableName);
+backend.adminReconcileRefund.addEnvironment("ENTITLEMENT_TABLE_NAME", entitlementTable.tableName);
+backend.adminReconcileRefund.addEnvironment("STRIPE_EVENT_TABLE_NAME", stripeEventTable.tableName);
+
 
 /*
  * Operational monitoring.

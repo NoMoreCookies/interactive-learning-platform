@@ -12,6 +12,7 @@ import type {
 } from "aws-lambda";
 
 import Stripe from "stripe";
+import { applyRefundObservation } from "../../shared/refund-reconciliation";
 
 import {
   env,
@@ -19,6 +20,8 @@ import {
 
 const dynamoDb =
   new DynamoDBClient({});
+
+const REFUND_EVENT_TYPES = new Set(["refund.created", "refund.updated", "refund.failed"]);
 
 const ALLOWED_EVENT_TYPES =
   new Set([
@@ -1683,9 +1686,8 @@ export const handler:
     }
 
     if (
-      !ALLOWED_EVENT_TYPES.has(
-        stripeEvent.type,
-      )
+      !ALLOWED_EVENT_TYPES.has(stripeEvent.type) &&
+      !REFUND_EVENT_TYPES.has(stripeEvent.type)
     ) {
       return jsonResponse(
         200,
@@ -1697,6 +1699,23 @@ export const handler:
     }
 
     try {
+      if (REFUND_EVENT_TYPES.has(stripeEvent.type)) {
+        const expectedLive = getExpectedLivemode();
+        if (stripeEvent.livemode !== expectedLive) {
+          throw new WebhookContractError("refund_event_wrong_livemode");
+        }
+        const observation = await applyRefundObservation(
+          stripeEvent.data.object as Stripe.Refund,
+          stripeEvent.id,
+          stripeEvent.created,
+        );
+        console.info("Refund webhook reconciled", {
+          eventId: stripeEvent.id,
+          outcome: observation.outcome,
+        });
+        return jsonResponse(200, { received: true });
+      }
+
       const checkout =
         await verifyCheckoutContract(
           stripeEvent,

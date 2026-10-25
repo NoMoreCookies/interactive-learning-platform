@@ -721,6 +721,22 @@ export default function AccountPage() {
         </section>
       </div>
 
+      <section className="mt-8 rounded-2xl border border-zinc-800 bg-zinc-950 p-6">
+        <h2 className="text-xl font-semibold text-zinc-100">
+          Reklamacje i historia zakupów
+        </h2>
+        <p className="mt-2 text-sm leading-6 text-zinc-400">
+          Sprawdź swoje zakupy, zgłoś problem z usługą lub przejrzyj
+          odpowiedzi na dotychczasowe reklamacje.
+        </p>
+        <Link
+          href="/account/complaints"
+          className="mt-5 inline-flex rounded-xl border border-blue-500/40 px-5 py-3 font-semibold text-blue-300 transition hover:border-blue-400 hover:bg-blue-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        >
+          Moje reklamacje
+        </Link>
+      </section>
+
       <div className="mt-8 flex flex-wrap gap-4">
         {isAdmin && (
           <Link
