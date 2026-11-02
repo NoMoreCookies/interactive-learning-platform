@@ -2,11 +2,11 @@ import {
   DynamoDBClient,
   GetItemCommand,
   PutItemCommand,
-  QueryCommand,
   TransactWriteItemsCommand,
   type AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import type Stripe from "stripe";
+import { purchaseHistory, type PurchaseHistory } from "./purchase-history";
 import { calculateSurvivingAccess, type PaidPurchase } from "./refund-entitlement";
 
 /*
@@ -16,7 +16,7 @@ import { calculateSurvivingAccess, type PaidPurchase } from "./refund-entitlemen
  * Never trust metadata alone: compare refund ID, PaymentIntent, amount,
  * currency, Checkout Session and owner against our private DynamoDB records.
  */
-const db = new DynamoDBClient({});
+const db = new DynamoDBClient({ maxAttempts: 1, requestHandler: { connectionTimeout: 1_000, requestTimeout: 3_000 } });
 const MAX_PURCHASES_PER_USER = 100;
 const MAX_OPTIMISTIC_RETRIES = 5;
 const SESSION_PATTERN = /^cs_(?:test|live)_[A-Za-z0-9]{8,220}$/;
@@ -49,7 +49,7 @@ type RefundRecord = {
 };
 type Entitlement = {
   version: number;
-  lastPurchaseId: string | null;
+  history: PurchaseHistory;
   revokedReason: string | null;
 };
 
@@ -152,45 +152,82 @@ async function getEntitlement(names: Names, userId: string): Promise<Entitlement
   }), { abortSignal: names.signal });
   if (!item) throw new Error("Purchase has no entitlement; requires investigation.");
   const version = positiveNumber(item, "version");
+  if (!Number.isSafeInteger(version + 1)) throw new Error("Entitlement version exhausted.");
   if (requiredString(item, "productCode") !== "PREMIUM") throw new Error("Unexpected entitlement product.");
   return {
     version,
-    lastPurchaseId: item.lastPurchaseId?.S ?? null,
+    history: purchaseHistory(item),
     revokedReason: item.revocationReason?.S ?? null,
   };
 }
 
-/* Query GSI is eventually consistent. Verify the currently known lastPurchaseId
- * from a STRONGLY consistent Entitlement so a just-processed checkout cannot
- * silently disappear from a recalculation. If proof is unavailable: RETRY.
- * Restrict per-user work to limit Lambda duration and cost abuse.
+/* The anchor is read before the immutable chain. Entitlement.version serializes
+ * every checkout and successful refund; a concurrent commit invalidates this
+ * snapshot at the final transaction. No GSI or paginated Query is involved.
  */
-async function readAllPurchases(names: Names, userId: string, requiredPurchaseId: string | null): Promise<Array<{item: Item; sessionId: string}>> {
-  const keys: string[] = [];
-  let cursor: Record<string, AttributeValue> | undefined;
-  do {
-    const result = await names.client.send(new QueryCommand({
-      TableName: names.purchases, IndexName: "userId-index",
-      KeyConditionExpression: "userId = :userId",
-      ExpressionAttributeValues: { ":userId": { S: userId } },
-      ProjectionExpression: "stripeCheckoutSessionId",
-      ExclusiveStartKey: cursor,
-      Limit: MAX_PURCHASES_PER_USER + 1,
-    }), { abortSignal: names.signal });
-    for (const item of result.Items ?? []) {
-      keys.push(requiredString(item, "stripeCheckoutSessionId"));
+async function readAllPurchases(names: Names, userId: string, history: PurchaseHistory): Promise<Array<{item: Item; sessionId: string}>> {
+  if (!history.verified) throw new Error("Purchase history is not verified; migration required before refund reconciliation.");
+  if (history.count > MAX_PURCHASES_PER_USER) throw new Error("Too many purchases for automatic entitlement reconciliation.");
+  const purchases: Array<{item: Item; sessionId: string}> = [];
+  const sessions = new Set<string>();
+  const payments = new Set<string>();
+  let cursor = history.head;
+  for (let sequence = history.count; sequence > 0; sequence--) {
+    names.signal?.throwIfAborted();
+    if (!cursor || !SESSION_PATTERN.test(cursor) || sessions.has(cursor)) throw new Error("Broken or cyclic purchase history.");
+    const item = await getPurchase(names, cursor);
+    const payment = requiredString(item, "stripePaymentIntentId");
+    if (requiredString(item, "userId") !== userId || requiredString(item, "stripeCheckoutSessionId") !== cursor ||
+        item.purchaseHistorySequence?.N !== String(sequence) || !PAYMENT_INTENT_PATTERN.test(payment) || payments.has(payment)) {
+      throw new Error("Purchase history association or sequence mismatch.");
     }
-    if (keys.length > MAX_PURCHASES_PER_USER) throw new Error("Too many purchases for automatic entitlement reconciliation.");
-    cursor = result.LastEvaluatedKey;
-  } while (cursor);
-  if (requiredPurchaseId && !keys.includes(requiredPurchaseId)) {
-    throw new Error("Purchase index is lagging Entitlement; retry reconciliation.");
+    if (requiredString(item, "currency") !== "pln" ||
+        !/^cus_[A-Za-z0-9]{8,220}$/.test(requiredString(item, "stripeCustomerId"))) {
+      throw new Error("Invalid purchase financial association.");
+    }
+    positiveNumber(item, "amountTotal");
+    const dates = ["paidAt", "grantedFrom", "grantedUntil"].map((field) => {
+      const value = requiredString(item, field);
+      const time = Date.parse(value);
+      if (!Number.isFinite(time) || new Date(time).toISOString() !== value) {
+        throw new Error("Invalid historical purchase timestamp.");
+      }
+      return time;
+    });
+    if (dates[1] < dates[0] || dates[2] !== dates[1] + positiveNumber(item, "accessDays") * 86_400_000) {
+      throw new Error("Inconsistent historical purchase grant.");
+    }
+    // Validate even refunded/excluded rows; corruption must never be hidden by filtering.
+    calculateSurvivingAccess([{
+      stripeCheckoutSessionId: cursor, paidAt: requiredString(item, "paidAt"),
+      grantedFrom: requiredString(item, "grantedFrom"), accessDays: positiveNumber(item, "accessDays"),
+    }]);
+    sessions.add(cursor);
+    payments.add(payment);
+    purchases.push({ item, sessionId: cursor });
+    const previous = item.purchaseHistoryPrevious;
+    if (!previous?.S && previous?.NULL !== true) throw new Error("Missing purchase history link.");
+    cursor = previous.S ?? null;
   }
-  return boundedMap(keys, async (sessionId) => {
-    const item = await getPurchase(names, sessionId);
-    if (requiredString(item, "userId") !== userId) throw new Error("Owner mismatch in purchase ledger.");
-    return { item, sessionId };
-  });
+  if (cursor !== null) throw new Error("Purchase history count mismatch.");
+  return purchases;
+}
+
+/** Read-only eligibility check. The reservation must fence this version transactionally.
+ * A later refund observation always verifies the history again; this is not a certificate.
+ */
+export async function preflightRefundHistory(userId: string, sessionId?: string): Promise<number> {
+  const signal = AbortSignal.timeout(6_000);
+  const names = tableNames({ signal });
+  const entitlement = await getEntitlement(names, userId);
+  if (entitlement.revokedReason && entitlement.revokedReason !== "REFUND_RECONCILIATION") {
+    throw new Error("Entitlement revoked for another reason; manual review required.");
+  }
+  const purchases = await readAllPurchases(names, userId, entitlement.history);
+  if (sessionId && !purchases.some((purchase) => purchase.sessionId === sessionId)) {
+    throw new Error("Refunded purchase missing from verified history.");
+  }
+  return entitlement.version;
 }
 
 // Bound concurrent reads as well as total records. No background writes.
@@ -235,6 +272,16 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
   const complaintId = refund.metadata?.complaintId;
   if (!sessionId || !SESSION_PATTERN.test(sessionId) || (!externalSessionId && !complaintId)) {
     throw new MissingRefundCorrelation("MISSING_METADATA");
+  }
+  // SEC-002 supplies its request-wide budget. Other callers get a bounded
+  // reconciliation budget below the shortest caller's 20s Lambda timeout.
+  if (!options.signal) {
+    const deadline = performance.now() + 12_000;
+    const signal = AbortSignal.timeout(Math.max(0, Math.ceil(deadline - performance.now())));
+    options = { ...options, signal, assertTransactionBudget: () => {
+      signal.throwIfAborted();
+      if (deadline - performance.now() <= 4_000) throw new Error("Insufficient reconciliation time; retry the same IDs. Earlier writes may have committed.");
+    } };
   }
   const names = tableNames(options);
   const record = await getRefundRecord(names, sessionId);
@@ -351,8 +398,8 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
     if (entitlement.revokedReason && entitlement.revokedReason !== "REFUND_RECONCILIATION") {
       throw new Error("Entitlement already revoked for another reason; requires manual review.");
     }
-    const allPurchases = await readAllPurchases(names, record.userId, entitlement.lastPurchaseId);
-    if (!allPurchases.some(({sessionId: id}) => id === sessionId)) throw new Error("Refunded purchase missing from GSI; retry.");
+    const allPurchases = await readAllPurchases(names, record.userId, entitlement.history);
+    if (!allPurchases.some(({sessionId: id}) => id === sessionId)) throw new Error("Refunded purchase missing from verified history; requires investigation.");
     const candidates = await boundedMap(allPurchases.filter((purchase) => purchase.sessionId !== sessionId), async ({ item, sessionId: id }): Promise<PaidPurchase | null> => {
       const other = await names.client.send(new GetItemCommand({
         TableName: names.refunds,
@@ -377,6 +424,9 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
       ":until": { S: calculated.accessUntil ?? now },
       ":now": { S: now }, ":next": { N: String(entitlement.version + 1) },
       ":previous": { N: String(entitlement.version) },
+      ":historyState": { S: "VERIFIED_V1" },
+      ":historyHead": { S: entitlement.history.head! },
+      ":historyCount": { N: String(entitlement.history.count) },
       ":source": { S: "STRIPE_ONE_TIME" },
     };
     if (noAccess) {
@@ -408,7 +458,7 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
         } },
         { Update: { TableName: names.entitlements,
           Key: { userId: { S: record.userId } },
-          ConditionExpression: "#version = :previous",
+          ConditionExpression: "#version = :previous AND purchaseHistoryState = :historyState AND purchaseHistoryHead = :historyHead AND purchaseHistoryCount = :historyCount",
           UpdateExpression: updateExpression,
           ExpressionAttributeNames: { "#version": "version", "#source": "source" },
           ExpressionAttributeValues: accessValues,

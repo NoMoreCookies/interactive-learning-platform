@@ -18,7 +18,7 @@ export const adminInitiateRefund = defineFunction({
   name: "admin-initiate-refund",
   entry: "./handler.ts",
   resourceGroupName: "data",
-  timeoutSeconds: 30,
+  timeoutSeconds: 28,
   environment: {
     STRIPE_SECRET_KEY: secret("STRIPE_SECRET_KEY"),
     STRIPE_EXPECTED_LIVEMODE: stripeExpectedLivemode,

@@ -29,6 +29,13 @@ if (
   );
 }
 
+// This is an audited migration identifier, NOT an ordinary feature flag.
+// Default closed. See docs/ARCH-005-purchase-history.md before configuring.
+const historyCutover = process.env.PURCHASE_HISTORY_CUTOVER_ID?.trim() ?? "";
+if (historyCutover && !/^[A-Za-z0-9_-]{8,128}$/.test(historyCutover)) {
+  throw new Error("Invalid PURCHASE_HISTORY_CUTOVER_ID audit reference.");
+}
+
 export const stripeWebhook =
   defineFunction({
     name: "stripe-webhook",
@@ -37,6 +44,7 @@ export const stripeWebhook =
     timeoutSeconds: 20,
 
     environment: {
+      PURCHASE_HISTORY_CUTOVER_ID: historyCutover,
       STRIPE_WEBHOOK_SECRET:
         secret(
           "STRIPE_WEBHOOK_SECRET",

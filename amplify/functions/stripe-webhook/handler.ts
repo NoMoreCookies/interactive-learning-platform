@@ -12,7 +12,8 @@ import type {
 } from "aws-lambda";
 
 import Stripe from "stripe";
-import { applyRefundObservation, RefundCorrelationIncident, MissingRefundCorrelation, recordExternalRefundReview } from "../../shared/refund-reconciliation";
+import { purchaseHistory, type PurchaseHistory } from "../../shared/purchase-history";
+import { preflightRefundHistory, applyRefundObservation, RefundCorrelationIncident, MissingRefundCorrelation, recordExternalRefundReview } from "../../shared/refund-reconciliation";
 
 import {
   env,
@@ -80,6 +81,7 @@ type EntitlementSnapshot =
       accessUntil: string;
       revokedAt: string | null;
       version: number;
+      history: PurchaseHistory;
     };
 
 function requireRuntimeEnvironmentVariable(
@@ -905,7 +907,7 @@ async function getEntitlement(
         },
 
         ProjectionExpression:
-          "accessUntil, revokedAt, #version",
+          "accessUntil, revokedAt, #version, purchaseHistoryHead, purchaseHistoryCount, purchaseHistoryState",
 
         ExpressionAttributeNames: {
           "#version":
@@ -970,6 +972,7 @@ async function getEntitlement(
         ?.S ??
       null,
     version,
+    history: purchaseHistory(response.Item),
   };
 }
 
@@ -1130,6 +1133,14 @@ async function grantOneTimeAccess(
         attempt.userId,
       );
 
+    if (entitlement.exists && entitlement.history.verified) {
+      const verifiedVersion = await preflightRefundHistory(attempt.userId);
+      if (verifiedVersion !== entitlement.version) continue;
+    }
+
+    if (entitlement.exists && !Number.isSafeInteger(entitlement.version + 1)) {
+      throw new Error("Entitlement version exhausted.");
+    }
     const {
       grantedFrom,
       grantedUntil,
@@ -1140,6 +1151,15 @@ async function grantOneTimeAccess(
         paidAt,
       );
 
+    // Absent Entitlement is meaningful ONLY under the audited inventory invariant:
+    // every pre-cutover identity/session owner has a retained anchor, even if unverified.
+    const bootstrapCutover = !entitlement.exists ? process.env.PURCHASE_HISTORY_CUTOVER_ID?.trim() : undefined;
+    if (bootstrapCutover && !/^[A-Za-z0-9_-]{8,128}$/.test(bootstrapCutover)) {
+      throw new Error("Invalid purchase history cutover configuration.");
+    }
+    // Append unverified when the operational boundary has not been certified.
+    const history = entitlement.exists ? entitlement.history : { head: null, count: 0 };
+    if (!Number.isSafeInteger(history.count + 1)) throw new Error("Purchase history counter exhausted.");
     const processedAt =
       new Date()
         .toISOString();
@@ -1175,10 +1195,16 @@ async function grantOneTimeAccess(
           ),
         },
 
+        ":historyCount": { N: String(history.count + 1) },
         ":purchaseId": {
           S: session.id,
         },
       };
+
+    if (bootstrapCutover) {
+      entitlementValues[":verifiedHistory"] = { S: "VERIFIED_V1" };
+      entitlementValues[":cutover"] = { S: bootstrapCutover };
+    }
 
     let entitlementCondition:
       string;
@@ -1261,6 +1287,8 @@ async function grantOneTimeAccess(
                   billingPurchaseTableName,
 
                 Item: {
+                  purchaseHistoryPrevious: history.head ? { S: history.head } : { NULL: true },
+                  purchaseHistorySequence: { N: String(history.count + 1) },
                   stripeCheckoutSessionId:
                     {
                       S:
@@ -1404,7 +1432,9 @@ async function grantOneTimeAccess(
                   "#source = :source, " +
                   "updatedAt = :updatedAt, " +
                   "#version = :newVersion, " +
-                  "lastPurchaseId = :purchaseId " +
+                  "lastPurchaseId = :purchaseId, " +
+                  "purchaseHistoryHead = :purchaseId, purchaseHistoryCount = :historyCount " +
+                  (bootstrapCutover ? ", purchaseHistoryState = :verifiedHistory, purchaseHistoryCutoverId = :cutover " : "") +
                   "REMOVE revokedAt, revocationReason",
 
                 ConditionExpression:

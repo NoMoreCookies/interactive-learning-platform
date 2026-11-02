@@ -1,0 +1,459 @@
+diff --git a/amplify/backend.ts b/amplify/backend.ts
+index 38d972e..dea94b1 100644
+--- a/amplify/backend.ts
++++ b/amplify/backend.ts
+@@ -826,6 +826,10 @@ billingSubscriptionTable.addGlobalSecondaryIndex({
+  *
+  * The premium backend uses a direct GetItem by userId.
+  *
++ * ARCH-005 adds purchaseHistoryHead (S/NULL), purchaseHistoryCount (N),
++ * purchaseHistoryState (VERIFIED_V1 only after audited migration). The history
++ * head includes refunded purchases and is independent of lastPurchaseId.
++ * Every history change must advance version; no application writer certifies it.
+  * Billing details are deliberately not required to authorize
+  * access to premium content.
+  */
+@@ -858,6 +862,9 @@ const entitlementTable =
+  * Primary access pattern:
+  * stripeCheckoutSessionId -> purchase
+  *
++ * Financial history: immutable purchaseHistoryPrevious + purchaseHistorySequence
++ * anchored by Entitlement.purchaseHistoryHead/Count/State (ARCH-005).
++ * The GSI below is only for non-financial listings, never completeness proof.
+  * Secondary access pattern:
+  * userId -> purchases ordered by paidAt
+  */
+@@ -1204,14 +1211,10 @@ backend.stripeWebhook.resources.lambda.addToRolePolicy(new PolicyStatement({
+   actions: ["dynamodb:GetItem", "dynamodb:PutItem"], resources: [stripeEventTable.tableArn],
+ }));
+ 
+-billingPurchaseTable.grant(
+-  backend
+-    .stripeWebhook
+-    .resources
+-    .lambda,
+-  "dynamodb:GetItem",
+-  "dynamodb:PutItem",
+-);
++backend.stripeWebhook.resources.lambda.addToRolePolicy(new PolicyStatement({
++  actions: ["dynamodb:GetItem", "dynamodb:PutItem"],
++  resources: [billingPurchaseTable.tableArn],
++}));
+ 
+ entitlementTable.grant(
+   backend
+@@ -1255,10 +1258,7 @@ billingRefundTable.grant(
+   "dynamodb:GetItem",
+   "dynamodb:UpdateItem",
+ );
+-backend.stripeWebhook.resources.lambda.addToRolePolicy(new PolicyStatement({
+-  actions: ["dynamodb:Query"],
+-  resources: [`${billingPurchaseTable.tableArn}/index/userId-index`],
+-}));
++
+ backend.stripeWebhook.addEnvironment("BILLING_REFUND_TABLE_NAME", billingRefundTable.tableName);
+ 
+ 
+@@ -1516,13 +1516,9 @@ backend.adminInitiateRefund.addEnvironment(
+  */
+ const reconcileLambda = backend.adminReconcileRefund.resources.lambda;
+ billingRefundTable.grant(reconcileLambda, "dynamodb:GetItem", "dynamodb:UpdateItem");
+-billingPurchaseTable.grant(reconcileLambda, "dynamodb:GetItem");
++reconcileLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem"], resources: [billingPurchaseTable.tableArn] }));
+ entitlementTable.grant(reconcileLambda, "dynamodb:GetItem", "dynamodb:UpdateItem");
+ reconcileLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:PutItem"], resources: [stripeEventTable.tableArn] }));
+-reconcileLambda.addToRolePolicy(new PolicyStatement({
+-  actions: ["dynamodb:Query"],
+-  resources: [`${billingPurchaseTable.tableArn}/index/userId-index`],
+-}));
+ backend.adminReconcileRefund.addEnvironment("BILLING_REFUND_TABLE_NAME", billingRefundTable.tableName);
+ backend.adminReconcileRefund.addEnvironment("BILLING_PURCHASE_TABLE_NAME", billingPurchaseTable.tableName);
+ backend.adminReconcileRefund.addEnvironment("ENTITLEMENT_TABLE_NAME", entitlementTable.tableName);
+@@ -1533,7 +1529,6 @@ importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem",
+ importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem", "dynamodb:ConditionCheckItem"], resources: [billingPurchaseTable.tableArn] }));
+ importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem", "dynamodb:UpdateItem"], resources: [entitlementTable.tableArn] }));
+ importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem", "dynamodb:PutItem"], resources: [stripeEventTable.tableArn] }));
+-importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:Query"], resources: [`${billingPurchaseTable.tableArn}/index/userId-index`] }));
+ backend.adminImportExternalRefund.addEnvironment("BILLING_REFUND_TABLE_NAME", billingRefundTable.tableName);
+ backend.adminImportExternalRefund.addEnvironment("BILLING_PURCHASE_TABLE_NAME", billingPurchaseTable.tableName);
+ backend.adminImportExternalRefund.addEnvironment("ENTITLEMENT_TABLE_NAME", entitlementTable.tableName);
+diff --git a/amplify/functions/stripe-webhook/handler.ts b/amplify/functions/stripe-webhook/handler.ts
+index 51f4860..c7eca35 100644
+--- a/amplify/functions/stripe-webhook/handler.ts
++++ b/amplify/functions/stripe-webhook/handler.ts
+@@ -12,6 +12,7 @@ import type {
+ } from "aws-lambda";
+ 
+ import Stripe from "stripe";
++import { purchaseHistory, type PurchaseHistory } from "../../shared/purchase-history";
+ import { applyRefundObservation, RefundCorrelationIncident, MissingRefundCorrelation, recordExternalRefundReview } from "../../shared/refund-reconciliation";
+ 
+ import {
+@@ -80,6 +81,7 @@ type EntitlementSnapshot =
+       accessUntil: string;
+       revokedAt: string | null;
+       version: number;
++      history: PurchaseHistory;
+     };
+ 
+ function requireRuntimeEnvironmentVariable(
+@@ -905,7 +907,7 @@ async function getEntitlement(
+         },
+ 
+         ProjectionExpression:
+-          "accessUntil, revokedAt, #version",
++          "accessUntil, revokedAt, #version, purchaseHistoryHead, purchaseHistoryCount, purchaseHistoryState",
+ 
+         ExpressionAttributeNames: {
+           "#version":
+@@ -970,6 +972,7 @@ async function getEntitlement(
+         ?.S ??
+       null,
+     version,
++    history: purchaseHistory(response.Item),
+   };
+ }
+ 
+@@ -1140,6 +1143,9 @@ async function grantOneTimeAccess(
+         paidAt,
+       );
+ 
++    // Append even while migration is incomplete; never certify legacy data here.
++    const history = entitlement.exists ? entitlement.history : { head: null, count: 0 };
++    if (!Number.isSafeInteger(history.count + 1)) throw new Error("Purchase history counter exhausted.");
+     const processedAt =
+       new Date()
+         .toISOString();
+@@ -1175,6 +1181,7 @@ async function grantOneTimeAccess(
+           ),
+         },
+ 
++        ":historyCount": { N: String(history.count + 1) },
+         ":purchaseId": {
+           S: session.id,
+         },
+@@ -1261,6 +1268,8 @@ async function grantOneTimeAccess(
+                   billingPurchaseTableName,
+ 
+                 Item: {
++                  purchaseHistoryPrevious: history.head ? { S: history.head } : { NULL: true },
++                  purchaseHistorySequence: { N: String(history.count + 1) },
+                   stripeCheckoutSessionId:
+                     {
+                       S:
+@@ -1404,7 +1413,8 @@ async function grantOneTimeAccess(
+                   "#source = :source, " +
+                   "updatedAt = :updatedAt, " +
+                   "#version = :newVersion, " +
+-                  "lastPurchaseId = :purchaseId " +
++                  "lastPurchaseId = :purchaseId, " +
++                  "purchaseHistoryHead = :purchaseId, purchaseHistoryCount = :historyCount " +
+                   "REMOVE revokedAt, revocationReason",
+ 
+                 ConditionExpression:
+diff --git a/amplify/shared/purchase-history.ts b/amplify/shared/purchase-history.ts
+new file mode 100644
+index 0000000..f9c8230
+--- /dev/null
++++ b/amplify/shared/purchase-history.ts
+@@ -0,0 +1,17 @@
++import type { AttributeValue } from "@aws-sdk/client-dynamodb";
++
++export type PurchaseHistory = { head: string | null; count: number; verified: boolean };
++
++// Absence is a legacy/unverified history, never evidence of an empty ledger.
++export function purchaseHistory(item: Record<string, AttributeValue>): PurchaseHistory {
++  const head = item.purchaseHistoryHead;
++  const count = item.purchaseHistoryCount;
++  const verified = item.purchaseHistoryState?.S === "VERIFIED_V1";
++  if (!head && !count && !verified) return { head: null, count: 0, verified: false };
++  const size = Number(count?.N);
++  if (!count?.N || !Number.isSafeInteger(size) || size < 0 ||
++      (size === 0 ? head?.NULL !== true : !/^cs_(?:test|live)_[A-Za-z0-9]{8,220}$/.test(head?.S ?? ""))) {
++    throw new Error("Invalid purchase history anchor; requires investigation.");
++  }
++  return { head: head?.S ?? null, count: size, verified };
++}
+diff --git a/amplify/shared/refund-reconciliation.ts b/amplify/shared/refund-reconciliation.ts
+index 27ea4e9..bbe98cd 100644
+--- a/amplify/shared/refund-reconciliation.ts
++++ b/amplify/shared/refund-reconciliation.ts
+@@ -2,11 +2,11 @@ import {
+   DynamoDBClient,
+   GetItemCommand,
+   PutItemCommand,
+-  QueryCommand,
+   TransactWriteItemsCommand,
+   type AttributeValue,
+ } from "@aws-sdk/client-dynamodb";
+ import type Stripe from "stripe";
++import { purchaseHistory, type PurchaseHistory } from "./purchase-history";
+ import { calculateSurvivingAccess, type PaidPurchase } from "./refund-entitlement";
+ 
+ /*
+@@ -16,7 +16,7 @@ import { calculateSurvivingAccess, type PaidPurchase } from "./refund-entitlemen
+  * Never trust metadata alone: compare refund ID, PaymentIntent, amount,
+  * currency, Checkout Session and owner against our private DynamoDB records.
+  */
+-const db = new DynamoDBClient({});
++const db = new DynamoDBClient({ maxAttempts: 1, requestHandler: { connectionTimeout: 1_000, requestTimeout: 3_000 } });
+ const MAX_PURCHASES_PER_USER = 100;
+ const MAX_OPTIMISTIC_RETRIES = 5;
+ const SESSION_PATTERN = /^cs_(?:test|live)_[A-Za-z0-9]{8,220}$/;
+@@ -49,7 +49,7 @@ type RefundRecord = {
+ };
+ type Entitlement = {
+   version: number;
+-  lastPurchaseId: string | null;
++  history: PurchaseHistory;
+   revokedReason: string | null;
+ };
+ 
+@@ -155,42 +155,40 @@ async function getEntitlement(names: Names, userId: string): Promise<Entitlement
+   if (requiredString(item, "productCode") !== "PREMIUM") throw new Error("Unexpected entitlement product.");
+   return {
+     version,
+-    lastPurchaseId: item.lastPurchaseId?.S ?? null,
++    history: purchaseHistory(item),
+     revokedReason: item.revocationReason?.S ?? null,
+   };
+ }
+ 
+-/* Query GSI is eventually consistent. Verify the currently known lastPurchaseId
+- * from a STRONGLY consistent Entitlement so a just-processed checkout cannot
+- * silently disappear from a recalculation. If proof is unavailable: RETRY.
+- * Restrict per-user work to limit Lambda duration and cost abuse.
++/* The anchor is read before the immutable chain. Entitlement.version serializes
++ * every checkout and successful refund; a concurrent commit invalidates this
++ * snapshot at the final transaction. No GSI or paginated Query is involved.
+  */
+-async function readAllPurchases(names: Names, userId: string, requiredPurchaseId: string | null): Promise<Array<{item: Item; sessionId: string}>> {
+-  const keys: string[] = [];
+-  let cursor: Record<string, AttributeValue> | undefined;
+-  do {
+-    const result = await names.client.send(new QueryCommand({
+-      TableName: names.purchases, IndexName: "userId-index",
+-      KeyConditionExpression: "userId = :userId",
+-      ExpressionAttributeValues: { ":userId": { S: userId } },
+-      ProjectionExpression: "stripeCheckoutSessionId",
+-      ExclusiveStartKey: cursor,
+-      Limit: MAX_PURCHASES_PER_USER + 1,
+-    }), { abortSignal: names.signal });
+-    for (const item of result.Items ?? []) {
+-      keys.push(requiredString(item, "stripeCheckoutSessionId"));
++async function readAllPurchases(names: Names, userId: string, history: PurchaseHistory): Promise<Array<{item: Item; sessionId: string}>> {
++  if (!history.verified) throw new Error("Purchase history is not verified; migration required before refund reconciliation.");
++  if (history.count > MAX_PURCHASES_PER_USER) throw new Error("Too many purchases for automatic entitlement reconciliation.");
++  const purchases: Array<{item: Item; sessionId: string}> = [];
++  const sessions = new Set<string>();
++  const payments = new Set<string>();
++  let cursor = history.head;
++  for (let sequence = history.count; sequence > 0; sequence--) {
++    names.signal?.throwIfAborted();
++    if (!cursor || !SESSION_PATTERN.test(cursor) || sessions.has(cursor)) throw new Error("Broken or cyclic purchase history.");
++    const item = await getPurchase(names, cursor);
++    const payment = requiredString(item, "stripePaymentIntentId");
++    if (requiredString(item, "userId") !== userId || requiredString(item, "stripeCheckoutSessionId") !== cursor ||
++        item.purchaseHistorySequence?.N !== String(sequence) || !PAYMENT_INTENT_PATTERN.test(payment) || payments.has(payment)) {
++      throw new Error("Purchase history association or sequence mismatch.");
+     }
+-    if (keys.length > MAX_PURCHASES_PER_USER) throw new Error("Too many purchases for automatic entitlement reconciliation.");
+-    cursor = result.LastEvaluatedKey;
+-  } while (cursor);
+-  if (requiredPurchaseId && !keys.includes(requiredPurchaseId)) {
+-    throw new Error("Purchase index is lagging Entitlement; retry reconciliation.");
++    sessions.add(cursor);
++    payments.add(payment);
++    purchases.push({ item, sessionId: cursor });
++    const previous = item.purchaseHistoryPrevious;
++    if (!previous?.S && previous?.NULL !== true) throw new Error("Missing purchase history link.");
++    cursor = previous.S ?? null;
+   }
+-  return boundedMap(keys, async (sessionId) => {
+-    const item = await getPurchase(names, sessionId);
+-    if (requiredString(item, "userId") !== userId) throw new Error("Owner mismatch in purchase ledger.");
+-    return { item, sessionId };
+-  });
++  if (cursor !== null) throw new Error("Purchase history count mismatch.");
++  return purchases;
+ }
+ 
+ // Bound concurrent reads as well as total records. No background writes.
+@@ -236,6 +234,16 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
+   if (!sessionId || !SESSION_PATTERN.test(sessionId) || (!externalSessionId && !complaintId)) {
+     throw new MissingRefundCorrelation("MISSING_METADATA");
+   }
++  // SEC-002 supplies its request-wide budget. Other callers get a bounded
++  // reconciliation budget below the shortest caller's 20s Lambda timeout.
++  if (!options.signal) {
++    const deadline = performance.now() + 12_000;
++    const signal = AbortSignal.timeout(Math.max(0, Math.ceil(deadline - performance.now())));
++    options = { ...options, signal, assertTransactionBudget: () => {
++      signal.throwIfAborted();
++      if (deadline - performance.now() <= 4_000) throw new Error("Insufficient reconciliation time; retry the same IDs. Earlier writes may have committed.");
++    } };
++  }
+   const names = tableNames(options);
+   const record = await getRefundRecord(names, sessionId);
+   // Imported refunds always require fresh API verification through the ADMIN operation.
+@@ -351,8 +359,8 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
+     if (entitlement.revokedReason && entitlement.revokedReason !== "REFUND_RECONCILIATION") {
+       throw new Error("Entitlement already revoked for another reason; requires manual review.");
+     }
+-    const allPurchases = await readAllPurchases(names, record.userId, entitlement.lastPurchaseId);
+-    if (!allPurchases.some(({sessionId: id}) => id === sessionId)) throw new Error("Refunded purchase missing from GSI; retry.");
++    const allPurchases = await readAllPurchases(names, record.userId, entitlement.history);
++    if (!allPurchases.some(({sessionId: id}) => id === sessionId)) throw new Error("Refunded purchase missing from verified history; requires investigation.");
+     const candidates = await boundedMap(allPurchases.filter((purchase) => purchase.sessionId !== sessionId), async ({ item, sessionId: id }): Promise<PaidPurchase | null> => {
+       const other = await names.client.send(new GetItemCommand({
+         TableName: names.refunds,
+@@ -377,6 +385,9 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
+       ":until": { S: calculated.accessUntil ?? now },
+       ":now": { S: now }, ":next": { N: String(entitlement.version + 1) },
+       ":previous": { N: String(entitlement.version) },
++      ":historyState": { S: "VERIFIED_V1" },
++      ":historyHead": { S: entitlement.history.head! },
++      ":historyCount": { N: String(entitlement.history.count) },
+       ":source": { S: "STRIPE_ONE_TIME" },
+     };
+     if (noAccess) {
+@@ -408,7 +419,7 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
+         } },
+         { Update: { TableName: names.entitlements,
+           Key: { userId: { S: record.userId } },
+-          ConditionExpression: "#version = :previous",
++          ConditionExpression: "#version = :previous AND purchaseHistoryState = :historyState AND purchaseHistoryHead = :historyHead AND purchaseHistoryCount = :historyCount",
+           UpdateExpression: updateExpression,
+           ExpressionAttributeNames: { "#version": "version", "#source": "source" },
+           ExpressionAttributeValues: accessValues,
+diff --git a/docs/ARCH-005-purchase-history.md b/docs/ARCH-005-purchase-history.md
+new file mode 100644
+index 0000000..a1972e9
+--- /dev/null
++++ b/docs/ARCH-005-purchase-history.md
+@@ -0,0 +1,125 @@
++# ARCH-005 — kompletna historia zakupów przy reconciliation
++
++Status: zmiana lokalna; brak wdrożenia i backfillu. Nie uzyskano dostępu do
++AWS/Stripe ani sekretów. Walidacja statyczna nie zastępuje testów integracyjnych.
++
++## Przyczyna i rozwiązanie
++
++GSI `BillingPurchase.userId-index` jest ostatecznie spójny. Obecność
++`Entitlement.lastPurchaseId` nie dowodzi obecności wszystkich starszych zakupów.
++Reconciler finansowy nie używa już tego indeksu. Indeks pozostaje dla list UI.
++
++Nie powstaje nowa tabela. BillingPurchase zachowuje PK Checkout Session i całą
++księgę finansową. Dodane atrybuty to `purchaseHistoryPrevious` (S lub jawne NULL)
++i `purchaseHistorySequence` (N, od 1). Entitlement przechowuje
++`purchaseHistoryHead` (S lub NULL), `purchaseHistoryCount` (N) oraz
++`purchaseHistoryState=VERIFIED_V1` po niezależnym potwierdzeniu kompletności.
++Głowa wskazuje ostatni zapisany zakup, również po jego zwrocie; jest niezależna
++od `lastPurchaseId`, który nadal oznacza ostatni zakup ocalały w kalkulacji.
++
++Checkout zapisuje odnośnik i numer w istniejącym warunkowym Put zakupu oraz
++głowę/licznik w istniejącym Update Entitlement, w tej samej TransactWriteItems co
++StripeEvent i CheckoutAttempt. Nie zmienia kluczy idempotencji ani kalkulacji
++okresu. Nie nadaje znacznika VERIFIED_V1. Dla starego rekordu bez atrybutów
++zaczyna niezweryfikowany łańcuch nowych zakupów; nie uznaje go za całą historię.
++Także pierwszy zakup bez wcześniejszego Entitlement pozostaje niezweryfikowany:
++brak rekordu nie jest dowodem braku historycznej księgi.
++
++## Gwarancje i limity
++
++Reconciler odczytuje Entitlement i każdy element łańcucha przez GetItem z
++ConsistentRead=true. Sprawdza jawne potwierdzenie kompletności, licznik,
++malejące numery, koniec NULL, brak cykli/powtórzonych sesji i PaymentIntent,
++zgodność userId oraz PK sesji i poprawność identyfikatorów PI. Brak rekordu,
++niepełne powiązania lub błędna liczba blokują transakcję. Nie ma Query ani
++paginacji GSI; iteracja po odnośnikach musi dojść do potwierdzonego końca.
++Porządek obliczania dostępu pozostaje w calculateSurvivingAccess:
++grantedFrom, a przy remisie Checkout Session. Kolejność łańcucha go nie zastępuje.
++
++Końcowa transakcja nadal atomowo zapisuje event, refund i Entitlement, sprawdza
++wersję Entitlement, a dodatkowo znacznik, głowę i licznik historii. Każdy zakup
++i udany refund zwiększa tę samą wersję. Gdy zakup lub inny refund zatwierdzi się
++w trakcie odczytów, stary snapshot nie może zostać zatwierdzony; następuje
++ponowny odczyt w istniejącej ograniczonej pętli. Jeżeli refund wygra pierwszy,
++checkout przelicza nadanie po ponownym odczycie. Zwrócone zakupy pozostają w historii.
++
++Limit wynosi 100 zakupów, także zwróconych. Większa historia blokuje automatyczne
++przeliczenie, ale nie blokuje dopisywania nowych zakupów. Odczyty łańcucha są
++sekwencyjne, pozostałe odczyty refundów mają współbieżność do 8. Maksymalnie
++5 prób optymistycznych. SEC-002 zachowuje wspólny deadline 22 s i margines 4 s
++przed transakcją. Pozostali wywołujący dostają budżet reconciliacji 12 s,
++z tym samym marginesem; nie jest to nowy deadline całego handlera. Klient
++reconcilera ma jedną próbę SDK, timeout połączenia 1 s i żądania 3 s.
++Duża historia/wolne odczyty mogą wymagać późniejszego ponowienia lub obsługi
++operacyjnej. Nie skracamy historii, aby zmieścić się w czasie.
++
++AbortError, timeout i utracona odpowiedź nie dowodzą rollbacku. Należy ponowić
++te same identyfikatory zakupu/refundu. Rezerwacja importu może być zapisana,
++zanim przeliczenie zostanie zablokowane. Nie ma kompensacji ani Stripe POST.
++
++## Wymagany późniejszy rollout i backfill — niewykonane
++
++1. Zaplanować okno serwisowe: wstrzymać wszystkich writerów zakupów, zwrotów
++   i Entitlement; uwzględnić kolejki, retry, uruchomione Lambdy i stare wersje.
++   Nie certyfikować historii podczas mieszanego wdrożenia. Stary writer nie
++   dopisuje odnośników i mógłby naruszyć potwierdzoną kompletność.
++2. Wdrożyć wszystkich nowych writerów/reconcilerów w tym kontrolowanym oknie.
++   Bez VERIFIED_V1 przeliczenie udanego refundu ma kończyć się błędem,
++   bez zmiany dostępu i bez pozornego potwierdzenia eventu.
++3. Pozyskać niezależny, kompletny obraz BillingPurchase, np. późniejszy eksport
++   PITR w ustalonym punkcie po zatrzymaniu writerów. Nie opierać manifestu na
++   GSI ani lastPurchaseId. Repozytorium nie zawiera takiego obrazu ani dowodu
++   kompletności. Eksport i narzędzie backfillu wymagają osobnej autoryzacji;
++   aplikacja nie dostaje Scan, eksportu ani uprawnień migratora.
++4. Sporządzić audytowany manifest wszystkich zakupów każdego użytkownika,
++   także zwróconych. Zweryfikować userId, Checkout Session, PaymentIntent,
++   CheckoutAttempt/StripeEvent, kwoty/waluty i pola okresów względem księgi.
++   Konflikty, brakujące rekordy lub niepewne pochodzenie blokują certyfikację.
++   Uporządkować deterministycznie i nadać odnośniki/numerację 1..N; pozostawić
++   istniejące dane finansowe i grantedFrom bez zmian. Łańcuch to enumeracja,
++   nie nowa reguła obliczania okresów.
++5. Przed zmianą istniejącej historii usunąć znacznik kompletności i zwiększyć
++   wersję Entitlement warunkowo względem odczytanej wersji. Zapisać wyłącznie
++   atrybuty historii zakupów z warunkami zgodności niezmiennych asocjacji.
++   Backfill większy od limitu transakcji dzielić na wznawialne partie;
++   częściowy backfill nigdy nie otrzymuje znacznika kompletności.
++6. Ponownie odczytać cały łańcuch silnie spójnie i porównać każdy element oraz
++   liczność z niezależnym manifestem. Dopiero potem warunkowo opublikować
++   głowę, licznik i VERIFIED_V1, zwiększając wersję. Wszyscy writerzy nadal
++   muszą być zatrzymani. Historia ponad 100 elementów nadal blokuje automat.
++7. Zweryfikować kompletność pokrycia manifestu, wznowić wyłącznie nowe wersje
++   writerów i ponowić nierozliczone eventy/importy z tymi samymi ID. Nowe konta
++   także potrzebują niezależnego potwierdzenia całej historii; kod celowo nie
++   zawiera automatycznej certyfikacji. Taki proces operacyjny trzeba przygotować
++   przed uruchomieniem automatycznych zwrotów dla nowych użytkowników.
++
++Nie należy wycofywać do starego writera przy pozostawionych VERIFIED_V1.
++Najpierw zatrzymać writerów i unieważnić certyfikację ze zmianą wersji.
++Nie usuwać Entitlement ani nie modyfikować certyfikowanych odnośników poza
++kontrolowaną migracją. Odtworzenie z backupu wymaga spójnego punktu dla tabel
++i ponownej weryfikacji. Bez spełnienia tych warunków nie deklarujemy migracji.
++
++## IAM, koszty i późniejsze testy
++
++Webhook, adminReconcileRefund i import tracą Query na userId-index.
++Granty BillingPurchase dla webhooka i adminReconcileRefund używają jawnego
++ARN tabeli zamiast helpera CDK dodającego index/*. Import już ma jawny ARN.
++Nie dodano akcji IAM ani usług. Uprawnienia list zakupów pozostają bez zmian.
++Migrator nie jest częścią ról aplikacji.
++
++Bez wdrożenia nie ma nowych kosztów AWS. Po wdrożeniu: większe elementy
++istniejących tabel (możliwe przekroczenie progów rozliczania zapisów), mocno
++spójny odczyt każdego zakupu oraz czas Lambdy. Brak nowej tabeli/indeksu,
++brak dodatkowych operacji w transakcji checkoutu. Eksport/backfill i ponowienia
++mają osobny koszt; nie określono go bez danych o wolumenie.
++
++Późniejsze testy integracyjne i bezpieczeństwa (NOT RUN): brak starszego zakupu
++w GSI przy obecnym lastPurchaseId; poprawny pełny łańcuch; brak znacznika;
++częściowy/przerwany backfill; 0/1/100/101 zakupów; brak ogniwa, cykl, zły numer,
++inny właściciel/sesja/PI i duplikat PI; zakupy out-of-order i remisy grantedFrom;
++dwa checkouty, checkout kontra refund, dwa refundy; ponowny ten sam event;
++refund ostatniego i wszystkich zakupów, potem nowy checkout; timeout przed/po
++commit i bezpieczny retry; utrata odpowiedzi; wyczerpanie czasu podczas historii;
++warunki publikacji znacznika, konflikt wersji migratora i rollback wersji kodu;
++kontrola wygenerowanego IAM (bez Query/Scan/index wildcard dla reconcilerów),
++odmowa zapisu/eksportu dla nieuprawnionych ról oraz brak Stripe POST.

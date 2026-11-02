@@ -826,6 +826,10 @@ billingSubscriptionTable.addGlobalSecondaryIndex({
  *
  * The premium backend uses a direct GetItem by userId.
  *
+ * ARCH-005 adds purchaseHistoryHead (S/NULL), purchaseHistoryCount (N),
+ * purchaseHistoryState (VERIFIED_V1 only after audited migration). The history
+ * head includes refunded purchases and is independent of lastPurchaseId.
+ * Every history change must advance version; bootstrap requires an audited cutover.
  * Billing details are deliberately not required to authorize
  * access to premium content.
  */
@@ -841,6 +845,8 @@ const entitlementTable =
         type:
           AttributeType.STRING,
       },
+
+      removalPolicy: RemovalPolicy.RETAIN,
 
       billingMode:
         BillingMode.PAY_PER_REQUEST,
@@ -858,6 +864,9 @@ const entitlementTable =
  * Primary access pattern:
  * stripeCheckoutSessionId -> purchase
  *
+ * Financial history: immutable purchaseHistoryPrevious + purchaseHistorySequence
+ * anchored by Entitlement.purchaseHistoryHead/Count/State (ARCH-005).
+ * The GSI below is only for non-financial listings, never completeness proof.
  * Secondary access pattern:
  * userId -> purchases ordered by paidAt
  */
@@ -873,6 +882,8 @@ const billingPurchaseTable =
         type:
           AttributeType.STRING,
       },
+
+      removalPolicy: RemovalPolicy.RETAIN,
 
       billingMode:
         BillingMode.PAY_PER_REQUEST,
@@ -911,13 +922,9 @@ const billingRefundTable = new Table(
  *
  * Read-only access to a purchase by Checkout Session ID.
  */
-billingPurchaseTable.grant(
-  backend
-    .checkoutStatus
-    .resources
-    .lambda,
-  "dynamodb:GetItem",
-);
+backend.checkoutStatus.resources.lambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:GetItem"], resources: [billingPurchaseTable.tableArn],
+}));
 
 backend.checkoutStatus.addEnvironment(
   "BILLING_PURCHASE_TABLE_NAME",
@@ -963,6 +970,8 @@ const stripeEventTable =
         type:
           AttributeType.STRING,
       },
+
+      removalPolicy: RemovalPolicy.RETAIN,
 
       billingMode:
         BillingMode.PAY_PER_REQUEST,
@@ -1204,23 +1213,14 @@ backend.stripeWebhook.resources.lambda.addToRolePolicy(new PolicyStatement({
   actions: ["dynamodb:GetItem", "dynamodb:PutItem"], resources: [stripeEventTable.tableArn],
 }));
 
-billingPurchaseTable.grant(
-  backend
-    .stripeWebhook
-    .resources
-    .lambda,
-  "dynamodb:GetItem",
-  "dynamodb:PutItem",
-);
+backend.stripeWebhook.resources.lambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:GetItem", "dynamodb:PutItem"],
+  resources: [billingPurchaseTable.tableArn],
+}));
 
-entitlementTable.grant(
-  backend
-    .stripeWebhook
-    .resources
-    .lambda,
-  "dynamodb:GetItem",
-  "dynamodb:UpdateItem",
-);
+backend.stripeWebhook.resources.lambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:GetItem", "dynamodb:UpdateItem"], resources: [entitlementTable.tableArn],
+}));
 
 backend.stripeWebhook.addEnvironment(
   "BILLING_CUSTOMER_TABLE_NAME",
@@ -1250,15 +1250,10 @@ backend.stripeWebhook.addEnvironment(
 /* Signed refund events reuse the webhook ingress and StripeEvent idempotency.
  * The original paid Checkout path keeps its exact existing permissions.
  */
-billingRefundTable.grant(
-  backend.stripeWebhook.resources.lambda,
-  "dynamodb:GetItem",
-  "dynamodb:UpdateItem",
-);
 backend.stripeWebhook.resources.lambda.addToRolePolicy(new PolicyStatement({
-  actions: ["dynamodb:Query"],
-  resources: [`${billingPurchaseTable.tableArn}/index/userId-index`],
+  actions: ["dynamodb:GetItem", "dynamodb:UpdateItem"], resources: [billingRefundTable.tableArn],
 }));
+
 backend.stripeWebhook.addEnvironment("BILLING_REFUND_TABLE_NAME", billingRefundTable.tableName);
 
 
@@ -1268,37 +1263,21 @@ backend.stripeWebhook.addEnvironment("BILLING_REFUND_TABLE_NAME", billingRefundT
  * Each premium Lambda may read only the caller's entitlement
  * record by primary key.
  */
-entitlementTable.grant(
-  backend
-    .premiumLessonContent
-    .resources
-    .lambda,
-  "dynamodb:GetItem",
-);
+backend.premiumLessonContent.resources.lambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:GetItem"], resources: [entitlementTable.tableArn],
+}));
 
-entitlementTable.grant(
-  backend
-    .premiumLessonAssetUrl
-    .resources
-    .lambda,
-  "dynamodb:GetItem",
-);
+backend.premiumLessonAssetUrl.resources.lambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:GetItem"], resources: [entitlementTable.tableArn],
+}));
 
-entitlementTable.grant(
-  backend
-    .taskAnswer
-    .resources
-    .lambda,
-  "dynamodb:GetItem",
-);
+backend.taskAnswer.resources.lambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:GetItem"], resources: [entitlementTable.tableArn],
+}));
 
-entitlementTable.grant(
-  backend
-    .taskSolution
-    .resources
-    .lambda,
-  "dynamodb:GetItem",
-);
+backend.taskSolution.resources.lambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:GetItem"], resources: [entitlementTable.tableArn],
+}));
 
 backend.premiumLessonContent.addEnvironment(
   "ENTITLEMENT_TABLE_NAME",
@@ -1325,13 +1304,9 @@ backend.taskSolution.addEnvironment(
  *
  * Read-only access to Entitlement by userId.
  */
-entitlementTable.grant(
-  backend
-    .premiumStatus
-    .resources
-    .lambda,
-  "dynamodb:GetItem",
-);
+backend.premiumStatus.resources.lambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:GetItem"], resources: [entitlementTable.tableArn],
+}));
 
 backend.premiumStatus.addEnvironment(
   "ENTITLEMENT_TABLE_NAME",
@@ -1427,7 +1402,9 @@ complaintTable.addGlobalSecondaryIndex({
  */
 const complaintsCreateLambda = backend.createComplaint.resources.lambda;
 complaintTable.grant(complaintsCreateLambda, "dynamodb:PutItem", "dynamodb:GetItem");
-billingPurchaseTable.grant(complaintsCreateLambda, "dynamodb:GetItem");
+complaintsCreateLambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:GetItem"], resources: [billingPurchaseTable.tableArn],
+}));
 backend.createComplaint.addEnvironment("COMPLAINT_TABLE_NAME", complaintTable.tableName);
 backend.createComplaint.addEnvironment("BILLING_PURCHASE_TABLE_NAME", billingPurchaseTable.tableName);
 
@@ -1440,7 +1417,9 @@ complaintsReadLambda.addToRolePolicy(new PolicyStatement({
 backend.getMyComplaints.addEnvironment("COMPLAINT_TABLE_NAME", complaintTable.tableName);
 
 const purchasesReadLambda = backend.getMyPurchases.resources.lambda;
-billingPurchaseTable.grant(purchasesReadLambda, "dynamodb:GetItem");
+purchasesReadLambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:GetItem"], resources: [billingPurchaseTable.tableArn],
+}));
 purchasesReadLambda.addToRolePolicy(new PolicyStatement({
   actions: ["dynamodb:Query"],
   resources: [`${billingPurchaseTable.tableArn}/index/userId-index`],
@@ -1463,29 +1442,33 @@ backend.adminResolveComplaint.addEnvironment("COMPLAINT_TABLE_NAME", complaintTa
  * C1 refund coordinator, gated off until the signed refund webhook,
  * reconciliation and correct Entitlement recalculation exist.
  *
- * Two read-only transactional condition checks prevent races with
+ * Transactional condition checks prevent races with
  * complaints/purchases. Only the private refund record can be written.
- * The Lambda has no access to Entitlement or raw user records.
+ * Entitlement is read-only, with a transactional version check before reservation.
  */
 const refundLambda =
   backend.adminInitiateRefund.resources.lambda;
+refundLambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:GetItem", "dynamodb:ConditionCheckItem"],
+  resources: [entitlementTable.tableArn],
+}));
+backend.adminInitiateRefund.addEnvironment("ENTITLEMENT_TABLE_NAME", entitlementTable.tableName);
+// Shared preflight resolves names but never reads/writes StripeEvent.
+backend.adminInitiateRefund.addEnvironment("STRIPE_EVENT_TABLE_NAME", stripeEventTable.tableName);
+
 
 complaintTable.grant(
   refundLambda,
   "dynamodb:GetItem",
 );
 
-billingPurchaseTable.grant(
-  refundLambda,
-  "dynamodb:GetItem",
-);
+refundLambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:GetItem"], resources: [billingPurchaseTable.tableArn],
+}));
 
-billingRefundTable.grant(
-  refundLambda,
-  "dynamodb:GetItem",
-  "dynamodb:PutItem",
-  "dynamodb:UpdateItem",
-);
+refundLambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"], resources: [billingRefundTable.tableArn],
+}));
 
 refundLambda.addToRolePolicy(
   new PolicyStatement({
@@ -1515,14 +1498,14 @@ backend.adminInitiateRefund.addEnvironment(
  * as the signed webhook, so both paths obey one entitlement invariant.
  */
 const reconcileLambda = backend.adminReconcileRefund.resources.lambda;
-billingRefundTable.grant(reconcileLambda, "dynamodb:GetItem", "dynamodb:UpdateItem");
-billingPurchaseTable.grant(reconcileLambda, "dynamodb:GetItem");
-entitlementTable.grant(reconcileLambda, "dynamodb:GetItem", "dynamodb:UpdateItem");
-reconcileLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:PutItem"], resources: [stripeEventTable.tableArn] }));
 reconcileLambda.addToRolePolicy(new PolicyStatement({
-  actions: ["dynamodb:Query"],
-  resources: [`${billingPurchaseTable.tableArn}/index/userId-index`],
+  actions: ["dynamodb:GetItem", "dynamodb:UpdateItem"], resources: [billingRefundTable.tableArn],
 }));
+reconcileLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem"], resources: [billingPurchaseTable.tableArn] }));
+reconcileLambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:GetItem", "dynamodb:UpdateItem"], resources: [entitlementTable.tableArn],
+}));
+reconcileLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:PutItem"], resources: [stripeEventTable.tableArn] }));
 backend.adminReconcileRefund.addEnvironment("BILLING_REFUND_TABLE_NAME", billingRefundTable.tableName);
 backend.adminReconcileRefund.addEnvironment("BILLING_PURCHASE_TABLE_NAME", billingPurchaseTable.tableName);
 backend.adminReconcileRefund.addEnvironment("ENTITLEMENT_TABLE_NAME", entitlementTable.tableName);
@@ -1533,7 +1516,6 @@ importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem",
 importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem", "dynamodb:ConditionCheckItem"], resources: [billingPurchaseTable.tableArn] }));
 importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem", "dynamodb:UpdateItem"], resources: [entitlementTable.tableArn] }));
 importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem", "dynamodb:PutItem"], resources: [stripeEventTable.tableArn] }));
-importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:Query"], resources: [`${billingPurchaseTable.tableArn}/index/userId-index`] }));
 backend.adminImportExternalRefund.addEnvironment("BILLING_REFUND_TABLE_NAME", billingRefundTable.tableName);
 backend.adminImportExternalRefund.addEnvironment("BILLING_PURCHASE_TABLE_NAME", billingPurchaseTable.tableName);
 backend.adminImportExternalRefund.addEnvironment("ENTITLEMENT_TABLE_NAME", entitlementTable.tableName);

@@ -1,0 +1,646 @@
+diff --git a/amplify/data/admin-initiate-refund/handler.ts b/amplify/data/admin-initiate-refund/handler.ts
+index cd9a912..de1c916 100644
+--- a/amplify/data/admin-initiate-refund/handler.ts
++++ b/amplify/data/admin-initiate-refund/handler.ts
+@@ -7,7 +7,9 @@ import {
+ } from "@aws-sdk/client-dynamodb";
+ import { env } from "$amplify/env/admin-initiate-refund";
+ import Stripe from "stripe";
++import { randomUUID } from "node:crypto";
+ import type { Schema } from "../resource";
++import { preflightRefundHistory } from "../../shared/refund-reconciliation";
+ 
+ /**
+  * SECURITY BOUNDARY
+@@ -18,10 +20,14 @@ import type { Schema } from "../resource";
+  * - No automatic retry of an ambiguous Stripe POST.
+  * - C1 NEVER changes Entitlement; enabling it requires completed C2.
+  */
+-const db = new DynamoDBClient({});
++// 25s work budget < 28s Lambda < 30s AppSync. Reserve 14s before the
++// transaction, 12s before arming and 10s before POST: POST 4s + result 1.5s
++// + race read 1.5s + uncertain-state write 1.5s leaves scheduling margin.
++// Timeouts bound local waiting; they never prove a remote write rolled back.
++const db = new DynamoDBClient({ maxAttempts: 1, requestHandler: { connectionTimeout: 500, requestTimeout: 1_500, throwOnRequestTimeout: true } });
+ const stripe = new Stripe(env.STRIPE_SECRET_KEY, {
+   maxNetworkRetries: 0,
+-  timeout: 10_000,
++  timeout: 4_000,
+ });
+ 
+ const SESSION_ID_PATTERN = /^cs_(?:test|live)_[A-Za-z0-9]{8,220}$/;
+@@ -129,6 +135,7 @@ async function existingRefund(sessionId: string): Promise<{
+   status: string;
+   stripeRefundId: string | null;
+   complaintId: string;
++  attemptId: string | null;
+ } | null> {
+   const result = await db.send(new GetItemCommand({
+     TableName: table.refunds,
+@@ -137,6 +144,7 @@ async function existingRefund(sessionId: string): Promise<{
+   }));
+   if (!result.Item) return null;
+   return {
++    attemptId: result.Item.attemptId?.S ?? null,
+     status: requiredString(result.Item, "status"),
+     stripeRefundId: result.Item.stripeRefundId?.S ?? null,
+     complaintId: requiredString(result.Item, "complaintId"),
+@@ -153,11 +161,23 @@ function describeExisting(refund: NonNullable<Awaited<ReturnType<typeof existing
+   };
+ }
+ 
+-async function reserveRefund(purchase: Purchase, complaint: Complaint, adminId: string): Promise<void> {
++async function reserveRefund(purchase: Purchase, complaint: Complaint, adminId: string, historyVersion: number, attemptId: string, priorAttemptId?: string): Promise<void> {
+   const now = new Date().toISOString();
+   // Transactional ConditionChecks eliminate races with complaint/purchase updates.
+   await db.send(new TransactWriteItemsCommand({
+     TransactItems: [
++      {
++        ConditionCheck: {
++          TableName: requiredEnv("ENTITLEMENT_TABLE_NAME"),
++          Key: { userId: { S: purchase.userId } },
++          ConditionExpression: "#version = :version AND purchaseHistoryState = :verified",
++          ExpressionAttributeNames: { "#version": "version" },
++          ExpressionAttributeValues: {
++            ":version": { N: String(historyVersion) },
++            ":verified": { S: "VERIFIED_V1" },
++          },
++        },
++      },
+       {
+         ConditionCheck: {
+           TableName: table.complaints,
+@@ -184,7 +204,25 @@ async function reserveRefund(purchase: Purchase, complaint: Complaint, adminId:
+           },
+         },
+       },
+-      {
++      priorAttemptId ? {
++        Update: {
++          TableName: table.refunds,
++          Key: { stripeCheckoutSessionId: { S: purchase.sessionId } },
++          ConditionExpression: "#status = :ready AND attemptId = :prior AND complaintId = :complaint AND userId = :user AND stripePaymentIntentId = :pi AND amount = :amount AND currency = :currency AND attribute_not_exists(stripeRefundId) AND attribute_not_exists(lastObservation)",
++          UpdateExpression: "SET attemptId = :attempt, updatedAt = :now, recoveryAudit = list_append(recoveryAudit, :audit)",
++          ExpressionAttributeNames: { "#status": "status" },
++          ExpressionAttributeValues: {
++            ":ready": { S: "NOT_STARTED" }, ":prior": { S: priorAttemptId },
++            ":attempt": { S: attemptId }, ":complaint": { S: complaint.complaintId },
++            ":user": { S: purchase.userId }, ":pi": { S: purchase.paymentIntentId },
++            ":amount": { N: String(purchase.amount) }, ":currency": { S: purchase.currency },
++            ":now": { S: now }, ":audit": { L: [{ M: {
++              transition: { S: "NOT_STARTED_RECLAIMED" }, adminId: { S: adminId },
++              attemptId: { S: attemptId }, previousAttemptId: { S: priorAttemptId }, at: { S: now },
++            } }] },
++          },
++        },
++      } : {
+         Put: {
+           TableName: table.refunds,
+           Item: {
+@@ -195,7 +233,12 @@ async function reserveRefund(purchase: Purchase, complaint: Complaint, adminId:
+             stripePaymentIntentId: { S: purchase.paymentIntentId },
+             amount: { N: String(purchase.amount) },
+             currency: { S: purchase.currency },
+-            status: { S: "INITIATING" },
++            status: { S: "NOT_STARTED" },
++            attemptId: { S: attemptId },
++            recoveryAudit: { L: [{ M: {
++              transition: { S: "RESERVED_NOT_STARTED" }, adminId: { S: adminId },
++              attemptId: { S: attemptId }, at: { S: now },
++            } }] },
+             createdAt: { S: now },
+             updatedAt: { S: now },
+           },
+@@ -206,18 +249,41 @@ async function reserveRefund(purchase: Purchase, complaint: Complaint, adminId:
+   }));
+ }
+ 
++// A successful fence is required before calling Stripe. A lost fence response
++// is ambiguous locally: leave INITIATING blocked; never infer rollback.
++async function armStripePost(sessionId: string, attemptId: string, adminId: string): Promise<void> {
++  const now = new Date().toISOString();
++  await db.send(new UpdateItemCommand({
++    TableName: table.refunds,
++    Key: { stripeCheckoutSessionId: { S: sessionId } },
++    ConditionExpression: "#status = :ready AND attemptId = :attempt AND attribute_not_exists(stripeRefundId) AND attribute_not_exists(lastObservation)",
++    UpdateExpression: "SET #status = :initiating, updatedAt = :now, recoveryAudit = list_append(recoveryAudit, :audit)",
++    ExpressionAttributeNames: { "#status": "status" },
++    ExpressionAttributeValues: {
++      ":ready": { S: "NOT_STARTED" }, ":initiating": { S: "INITIATING" },
++      ":attempt": { S: attemptId }, ":now": { S: now },
++      ":audit": { L: [{ M: {
++        transition: { S: "POST_ARMED" }, attemptId: { S: attemptId },
++        adminId: { S: adminId }, at: { S: now },
++      } }] },
++    },
++  }));
++}
++
+ async function storeStripeResult(
+   sessionId: string,
+   stripeRefundId: string,
+   stripeStatus: string,
++  attemptId: string,
+ ): Promise<void> {
+   await db.send(new UpdateItemCommand({
+     TableName: table.refunds,
+     Key: { stripeCheckoutSessionId: { S: sessionId } },
+     UpdateExpression: "SET #status = :awaiting, stripeRefundId = :refundId, stripeStatus = :stripeStatus, updatedAt = :now",
+-    ConditionExpression: "#status = :initiating AND attribute_not_exists(stripeRefundId)",
++    ConditionExpression: "#status = :initiating AND attemptId = :attempt AND attribute_not_exists(stripeRefundId) AND attribute_not_exists(lastObservation)",
+     ExpressionAttributeNames: { "#status": "status" },
+     ExpressionAttributeValues: {
++      ":attempt": { S: attemptId },
+       ":awaiting": { S: "AWAITING_RECONCILIATION" },
+       ":initiating": { S: "INITIATING" },
+       ":refundId": { S: stripeRefundId },
+@@ -227,16 +293,21 @@ async function storeStripeResult(
+   }));
+ }
+ 
+-async function markUncertain(sessionId: string): Promise<void> {
++async function markUncertain(sessionId: string, attemptId: string, postAttempted: boolean): Promise<void> {
+   try {
+     await db.send(new UpdateItemCommand({
+       TableName: table.refunds,
+       Key: { stripeCheckoutSessionId: { S: sessionId } },
+-      UpdateExpression: "SET #status = :uncertain, updatedAt = :now",
+-      ConditionExpression: "#status = :initiating",
++      UpdateExpression: "SET #status = :uncertain, updatedAt = :now, recoveryAudit = list_append(recoveryAudit, :audit)",
++      ConditionExpression: "#status = :initiating AND attemptId = :attempt AND attribute_not_exists(stripeRefundId) AND attribute_not_exists(lastObservation)",
+       ExpressionAttributeNames: { "#status": "status" },
+       ExpressionAttributeValues: {
+-        ":uncertain": { S: "RECONCILIATION_REQUIRED" },
++        ":uncertain": { S: postAttempted ? "RECONCILIATION_REQUIRED" : "NOT_STARTED" },
++        ":attempt": { S: attemptId },
++        ":audit": { L: [{ M: {
++          transition: { S: postAttempted ? "POST_OUTCOME_UNCERTAIN" : "CONFIRMED_NOT_STARTED" },
++          attemptId: { S: attemptId }, at: { S: new Date().toISOString() },
++        } }] },
+         ":initiating": { S: "INITIATING" },
+         ":now": { S: new Date().toISOString() },
+       },
+@@ -249,6 +320,7 @@ async function markUncertain(sessionId: string): Promise<void> {
+ }
+ 
+ export const handler: Schema["adminInitiateRefund"]["functionHandler"] = async (event) => {
++  const deadline = performance.now() + 25_000;
+   const adminId = assertedAdminId(event.identity);
+   const { complaintId, stripeCheckoutSessionId, confirmationSessionId } = event.arguments;
+   if (
+@@ -265,7 +337,13 @@ export const handler: Schema["adminInitiateRefund"]["functionHandler"] = async (
+   }
+ 
+   const prior = await existingRefund(stripeCheckoutSessionId);
+-  if (prior) return describeExisting(prior, complaintId);
++  if (prior) {
++    describeExisting(prior, complaintId); // association check also applies to recovery
++    if (prior.status !== "NOT_STARTED" || !prior.attemptId || prior.stripeRefundId) {
++      return describeExisting(prior, complaintId);
++    }
++  }
++  const attemptId = randomUUID();
+ 
+   const [purchase, complaint] = await Promise.all([
+     getPurchase(stripeCheckoutSessionId),
+@@ -290,7 +368,7 @@ export const handler: Schema["adminInitiateRefund"]["functionHandler"] = async (
+   }
+ 
+   // Preflight is read-only and happens BEFORE we reserve a refund.
+-  const pi = await stripe.paymentIntents.retrieve(purchase.paymentIntentId);
++  const pi = await stripe.paymentIntents.retrieve(purchase.paymentIntentId, {}, { timeout: 2_000 });
+   if (
+     pi.livemode !== livemode || pi.status !== "succeeded" ||
+     pi.amount_received !== purchase.amount || pi.currency !== purchase.currency ||
+@@ -301,13 +379,17 @@ export const handler: Schema["adminInitiateRefund"]["functionHandler"] = async (
+   const priorStripeRefunds = await stripe.refunds.list({
+     payment_intent: purchase.paymentIntentId,
+     limit: 1,
+-  });
++  }, { timeout: 2_000 });
+   if (priorStripeRefunds.has_more || priorStripeRefunds.data.length > 0) {
+     throw new Error("Dla tej płatności istnieje już refund w Stripe. Wymagane ręczne uzgodnienie.");
+   }
+ 
++  const historyVersion = await preflightRefundHistory(purchase.userId, purchase.sessionId);
++  if (deadline - performance.now() < 14_000) {
++    throw new Error("Brak czasu na bezpieczne wykonanie zwrotu; nie wysłano Stripe POST.");
++  }
+   try {
+-    await reserveRefund(purchase, complaint, adminId);
++    await reserveRefund(purchase, complaint, adminId, historyVersion, attemptId, prior?.attemptId ?? undefined);
+   } catch (error) {
+     const competing = await existingRefund(stripeCheckoutSessionId);
+     if (competing) return describeExisting(competing, complaintId);
+@@ -317,7 +399,17 @@ export const handler: Schema["adminInitiateRefund"]["functionHandler"] = async (
+     throw new Error("Nie udało się bezpiecznie zarezerwować zwrotu.");
+   }
+ 
++  // NOT_STARTED is durable and safe to reclaim even if this invocation dies.
++  if (deadline - performance.now() < 12_000) {
++    throw new Error("Brak czasu; rezerwacja NOT_STARTED może zostać wznowiona przez ADMIN.");
++  }
++  await armStripePost(stripeCheckoutSessionId, attemptId, adminId);
++  let postAttempted = false;
+   try {
++    if (deadline - performance.now() < 10_000) {
++      throw new Error("Insufficient time after reservation; Stripe POST not started.");
++    }
++    postAttempted = true; // Any error from this point is an ambiguous POST outcome.
+     const refund = await stripe.refunds.create(
+       {
+         payment_intent: purchase.paymentIntentId,
+@@ -334,11 +426,10 @@ export const handler: Schema["adminInitiateRefund"]["functionHandler"] = async (
+       refund.amount !== purchase.amount || refund.currency !== purchase.currency ||
+       refund.payment_intent !== purchase.paymentIntentId
+     ) {
+-      await markUncertain(stripeCheckoutSessionId);
+       throw new Error("Stripe zwrócił niezgodny refund. Wymagana ręczna weryfikacja.");
+     }
+     try {
+-      await storeStripeResult(stripeCheckoutSessionId, refund.id, refund.status ?? "unknown");
++      await storeStripeResult(stripeCheckoutSessionId, refund.id, refund.status ?? "unknown", attemptId);
+     } catch (dbError) {
+       /* A signed Stripe webhook may have reconciled the refund before this
+        * admin Lambda received its POST response. Never overwrite SUCCEEDED.
+@@ -354,7 +445,10 @@ export const handler: Schema["adminInitiateRefund"]["functionHandler"] = async (
+     return { status: "AWAITING_RECONCILIATION", stripeRefundId: refund.id };
+   } catch (error) {
+     // Could have succeeded remotely. NEVER automatically issue a second POST.
+-    await markUncertain(stripeCheckoutSessionId);
++    await markUncertain(stripeCheckoutSessionId, attemptId, postAttempted);
++    if (!postAttempted) {
++      throw new Error("Nie wysłano Stripe POST. Ponów zatwierdzenie ADMIN wyłącznie dla stanu NOT_STARTED.");
++    }
+     console.error("Refund outcome needs reconciliation", {
+       errorName: error instanceof Error ? error.name : "UnknownError",
+     });
+diff --git a/amplify/data/admin-initiate-refund/resource.ts b/amplify/data/admin-initiate-refund/resource.ts
+index 42602a5..544dea6 100644
+--- a/amplify/data/admin-initiate-refund/resource.ts
++++ b/amplify/data/admin-initiate-refund/resource.ts
+@@ -18,7 +18,7 @@ export const adminInitiateRefund = defineFunction({
+   name: "admin-initiate-refund",
+   entry: "./handler.ts",
+   resourceGroupName: "data",
+-  timeoutSeconds: 30,
++  timeoutSeconds: 28,
+   environment: {
+     STRIPE_SECRET_KEY: secret("STRIPE_SECRET_KEY"),
+     STRIPE_EXPECTED_LIVEMODE: stripeExpectedLivemode,
+diff --git a/docs/ARCH-005-purchase-history.md b/docs/ARCH-005-purchase-history.md
+new file mode 100644
+index 0000000..484bdec
+--- /dev/null
++++ b/docs/ARCH-005-purchase-history.md
+@@ -0,0 +1,350 @@
++# ARCH-005 — kompletna historia zakupów przy reconciliation
++
++Status: zmiana lokalna; brak wdrożenia i backfillu. Nie uzyskano dostępu do
++AWS/Stripe ani sekretów. Walidacja statyczna nie zastępuje testów integracyjnych.
++
++## Przyczyna i rozwiązanie
++
++GSI `BillingPurchase.userId-index` jest ostatecznie spójny. Obecność
++`Entitlement.lastPurchaseId` nie dowodzi obecności wszystkich starszych zakupów.
++Reconciler finansowy nie używa już tego indeksu. Indeks pozostaje dla list UI.
++
++Nie powstaje nowa tabela. BillingPurchase zachowuje PK Checkout Session i całą
++księgę finansową. Dodane atrybuty to `purchaseHistoryPrevious` (S lub jawne NULL)
++i `purchaseHistorySequence` (N, od 1). Entitlement przechowuje
++`purchaseHistoryHead` (S lub NULL), `purchaseHistoryCount` (N) oraz
++`purchaseHistoryState=VERIFIED_V1` po niezależnym potwierdzeniu kompletności.
++Głowa wskazuje ostatni zapisany zakup, również po jego zwrocie; jest niezależna
++od `lastPurchaseId`, który nadal oznacza ostatni zakup ocalały w kalkulacji.
++
++Checkout zapisuje odnośnik i numer w istniejącym warunkowym Put zakupu oraz
++głowę/licznik w istniejącym Update Entitlement, w tej samej TransactWriteItems co
++StripeEvent i CheckoutAttempt. Nie zmienia kluczy idempotencji ani kalkulacji
++okresu. Domyślnie nie nadaje znacznika VERIFIED_V1; wyjątek po audytowanym cutoverze opisano niżej. Dla starego rekordu bez atrybutów
++zaczyna niezweryfikowany łańcuch nowych zakupów; nie uznaje go za całą historię.
++Przy wyłączonej granicy cutoveru pierwszy zakup bez Entitlement pozostaje niezweryfikowany:
++brak rekordu nie jest dowodem braku historycznej księgi.
++
++## Gwarancje i limity
++
++Reconciler odczytuje Entitlement i każdy element łańcucha przez GetItem z
++ConsistentRead=true. Sprawdza jawne potwierdzenie kompletności, licznik,
++malejące numery, koniec NULL, brak cykli/powtórzonych sesji i PaymentIntent,
++zgodność userId oraz PK sesji i poprawność identyfikatorów PI. Brak rekordu,
++niepełne powiązania lub błędna liczba blokują transakcję. Nie ma Query ani
++paginacji GSI; iteracja po odnośnikach musi dojść do potwierdzonego końca.
++Porządek obliczania dostępu pozostaje w calculateSurvivingAccess:
++grantedFrom, a przy remisie Checkout Session. Kolejność łańcucha go nie zastępuje.
++
++Końcowa transakcja nadal atomowo zapisuje event, refund i Entitlement, sprawdza
++wersję Entitlement, a dodatkowo znacznik, głowę i licznik historii. Każdy zakup
++i udany refund zwiększa tę samą wersję. Gdy zakup lub inny refund zatwierdzi się
++w trakcie odczytów, stary snapshot nie może zostać zatwierdzony; następuje
++ponowny odczyt w istniejącej ograniczonej pętli. Jeżeli refund wygra pierwszy,
++checkout przelicza nadanie po ponownym odczycie. Zwrócone zakupy pozostają w historii.
++
++Limit wynosi 100 zakupów, także zwróconych. Większa historia blokuje automatyczne
++przeliczenie oraz checkout certyfikowanej historii (opis poniżej). Odczyty łańcucha są
++sekwencyjne, pozostałe odczyty refundów mają współbieżność do 8. Maksymalnie
++5 prób optymistycznych. SEC-002 zachowuje wspólny deadline 22 s i margines 4 s
++przed transakcją. Pozostali wywołujący dostają budżet reconciliacji 12 s,
++z tym samym marginesem; nie jest to nowy deadline całego handlera. Klient
++reconcilera ma jedną próbę SDK, timeout połączenia 1 s i żądania 3 s.
++Duża historia/wolne odczyty mogą wymagać późniejszego ponowienia lub obsługi
++operacyjnej. Nie skracamy historii, aby zmieścić się w czasie.
++
++AbortError, timeout i utracona odpowiedź nie dowodzą rollbacku. Należy ponowić
++te same identyfikatory zakupu/refundu. Rezerwacja importu może być zapisana,
++zanim przeliczenie zostanie zablokowane. Nie ma kompensacji ani Stripe POST.
++
++## Wymagany późniejszy rollout i backfill — niewykonane
++
++1. Zaplanować okno serwisowe: wstrzymać wszystkich writerów zakupów, zwrotów
++   i Entitlement; uwzględnić kolejki, retry, uruchomione Lambdy i stare wersje.
++   Nie certyfikować historii podczas mieszanego wdrożenia. Stary writer nie
++   dopisuje odnośników i mógłby naruszyć potwierdzoną kompletność.
++2. Wdrożyć wszystkich nowych writerów/reconcilerów w tym kontrolowanym oknie.
++   Bez VERIFIED_V1 przeliczenie udanego refundu ma kończyć się błędem,
++   bez zmiany dostępu i bez pozornego potwierdzenia eventu.
++3. Pozyskać niezależny, kompletny obraz BillingPurchase, np. późniejszy eksport
++   PITR w ustalonym punkcie po zatrzymaniu writerów. Nie opierać manifestu na
++   GSI ani lastPurchaseId. Repozytorium nie zawiera takiego obrazu ani dowodu
++   kompletności. Eksport i narzędzie backfillu wymagają osobnej autoryzacji;
++   aplikacja nie dostaje Scan, eksportu ani uprawnień migratora.
++4. Sporządzić audytowany manifest wszystkich zakupów każdego użytkownika,
++   także zwróconych. Zweryfikować userId, Checkout Session, PaymentIntent,
++   CheckoutAttempt/StripeEvent, kwoty/waluty i pola okresów względem księgi.
++   Konflikty, brakujące rekordy lub niepewne pochodzenie blokują certyfikację.
++   Uporządkować deterministycznie i nadać odnośniki/numerację 1..N; pozostawić
++   istniejące dane finansowe i grantedFrom bez zmian. Łańcuch to enumeracja,
++   nie nowa reguła obliczania okresów.
++5. Przed zmianą istniejącej historii usunąć znacznik kompletności i zwiększyć
++   wersję Entitlement warunkowo względem odczytanej wersji. Zapisać wyłącznie
++   atrybuty historii zakupów z warunkami zgodności niezmiennych asocjacji.
++   Backfill większy od limitu transakcji dzielić na wznawialne partie;
++   częściowy backfill nigdy nie otrzymuje znacznika kompletności.
++6. Ponownie odczytać cały łańcuch silnie spójnie i porównać każdy element oraz
++   liczność z niezależnym manifestem. Dopiero potem warunkowo opublikować
++   głowę, licznik i VERIFIED_V1, zwiększając wersję. Wszyscy writerzy nadal
++   muszą być zatrzymani. Historia ponad 100 elementów nadal blokuje automat.
++7. Zweryfikować kompletność pokrycia manifestu, wznowić wyłącznie nowe wersje
++   writerów i ponowić nierozliczone eventy/importy z tymi samymi ID. Bootstrap
++   nowych kont wymaga dodatkowej granicy operacyjnej opisanej niżej.
++
++Nie należy wycofywać do starego writera przy pozostawionych VERIFIED_V1.
++Najpierw zatrzymać writerów i unieważnić certyfikację ze zmianą wersji.
++Nie usuwać Entitlement ani nie modyfikować certyfikowanych odnośników poza
++kontrolowaną migracją. Odtworzenie z backupu wymaga spójnego punktu dla tabel
++i ponownej weryfikacji. Bez spełnienia tych warunków nie deklarujemy migracji.
++
++## IAM, koszty i późniejsze testy
++
++Webhook, adminReconcileRefund i import tracą Query na userId-index.
++Granty BillingPurchase dla webhooka i adminReconcileRefund używają jawnego
++ARN tabeli zamiast helpera CDK dodającego index/*. Import już ma jawny ARN.
++Dodano read-only GetItem/ConditionCheckItem Entitlement dla preflightu ADMIN; bez nowych usług. Uprawnienia list zakupów pozostają bez zmian.
++Migrator nie jest częścią ról aplikacji.
++
++Bez wdrożenia nie ma nowych kosztów AWS. Po wdrożeniu: większe elementy
++istniejących tabel (możliwe przekroczenie progów rozliczania zapisów), mocno
++spójny odczyt każdego zakupu oraz czas Lambdy. Brak nowej tabeli/indeksu,
++brak dodatkowych operacji w transakcji checkoutu. Eksport/backfill i ponowienia
++mają osobny koszt; nie określono go bez danych o wolumenie.
++
++Późniejsze testy integracyjne i bezpieczeństwa (NOT RUN): brak starszego zakupu
++w GSI przy obecnym lastPurchaseId; poprawny pełny łańcuch; brak znacznika;
++częściowy/przerwany backfill; 0/1/100/101 zakupów; brak ogniwa, cykl, zły numer,
++inny właściciel/sesja/PI i duplikat PI; zakupy out-of-order i remisy grantedFrom;
++dwa checkouty, checkout kontra refund, dwa refundy; ponowny ten sam event;
++refund ostatniego i wszystkich zakupów, potem nowy checkout; timeout przed/po
++commit i bezpieczny retry; utrata odpowiedzi; wyczerpanie czasu podczas historii;
++warunki publikacji znacznika, konflikt wersji migratora i rollback wersji kodu;
++kontrola wygenerowanego IAM (bez Query/Scan/index wildcard dla reconcilerów),
++odmowa zapisu/eksportu dla nieuprawnionych ról oraz brak Stripe POST.
++
++
++## Niezależny manifest i granica zaufania
++
++Sam eksport aktualnego BillingPurchase NIE dowodzi kompletności finansowej:
++może już zawierać zgodnie skrócony łańcuch. Manifest musi zostać uzgodniony
++z niezależną historią opłaconych sesji i PaymentIntent Stripe, zwrotów, prób
++checkoutu oraz zachowanych zdarzeń/księgowości. Rozliczyć wszystkie rozbieżności,
++także płatność bez rekordu, zakup bez zdarzenia i różne konta Stripe/TEST/LIVE.
++Każdy manifest zawiera środowisko, konto Stripe, zakres czasu i watermark,
++identyfikatory właściciela/sesji/PI, kwotę, walutę, daty, granty, stan refundu,
++źródła dowodów, hash pliku i akceptację niezależnego recenzenta. Zachować go
++poza rolami writerów aplikacji wraz z raportem porównania i ticketem migracji.
++Nie odtwarzać grantów na podstawie domysłu; brak dowodu blokuje certyfikację.
++Niniejsza zmiana nie pobiera manifestu ani nie wykonuje backfillu.
++
++Immutability aplikacji NIE chroni przed administratorem AWS z PutItem,
++UpdateItem, DeleteItem, zmianą roli, tabeli, backupu lub kodu. Taki principal
++może podmienić kwoty, PI albo cały spójny łańcuch wraz z VERIFIED_V1. Walidator
++wykrywa błędy struktury/formatu/asocjacji, ale nie potwierdza każdego poprawnie
++sformatowanego PI w Stripe przy każdym odczycie. To jawna granica zaufania.
++Wymagane operacyjnie: ograniczony break-glass i migrator, niezależna autoryzacja,
++audyt zmian i okresowe uzgodnienie z manifestem. To nie jest kryptograficzna
++księga odporna na administratora AWS. Po podejrzeniu manipulacji zatrzymać
++writerów i bootstrap, unieważnić certyfikację warunkowo ze zmianą wersji;
++nie wykonywać automatycznej naprawy ani opierać się na GSI.
++
++## Bootstrap po cutoverze — domyślnie zamknięty
++
++`PURCHASE_HISTORY_CUTOVER_ID` jest pusty domyślnie. Nie włączono go w tej zmianie.
++Wartość jest identyfikatorem zatwierdzonego dowodu operacyjnego, nie dowodem sama
++w sobie. Włączenie wymaga WSZYSTKICH poniższych warunków:
++
++1. Wstrzymać rejestrację, checkout i wszystkich writerów; odczekać uruchomione
++   żądania, retry, stare wersje i zdarzenia. Sporządzić kompletny inventory Cognito
++   (także niepotwierdzone konta), kont usuniętych z historią oraz właścicieli
++   wszystkich prób checkoutu i sesji Stripe. Uwzględnić otwarte/pending sesje,
++   opóźnione płatności i webhooki. Nie wystarczy inventory samych Entitlement.
++2. KAŻDY istniejący userId i właściciel starej sesji musi mieć trwały anchor
++   Entitlement. Istniejący poprawny rekord zachować. Brakujący utworzyć warunkowo
++   z version=1, productCode=PREMIUM, accessUntil w przeszłości, head=NULL,
++   count=0 i BEZ VERIFIED_V1, dopóki manifest nie dowiedzie kompletności.
++   To blokada legacy, nie twierdzenie o zerowej liczbie zakupów. Nie nadpisywać
++   istniejących grantów ani maskować brakujących danych przez pustą certyfikację.
++3. Dla potwierdzonego pustego manifestu można osobno certyfikować count=0;
++   pozostali legacy pozostają niezweryfikowani albo przechodzą opisany backfill.
++   Niezależny recenzent potwierdza pełne pokrycie inventory, również pending.
++4. W tym samym oknie wdrożyć wszystkich writerów z zatwierdzonym ID cutoveru,
++   zachować dowody i dopiero potem wznowić rejestrację/checkout. Utrzymywać zakaz
++   usuwania anchorów i odtwarzania starych tożsamości bez ich anchorów.
++
++Dopiero przy tym invariantcie brak Entitlement oznacza nową tożsamość spoza
++legacy inventory. Pierwszy opłacony checkout zapisuje VERIFIED_V1 oraz
++purchaseHistoryCutoverId atomowo z pierwszym zakupem pod warunkiem
++attribute_not_exists(userId). Dwa pierwsze checkouty konkurują o ten sam rekord;
++przegrany ponownie odczytuje wersję i dopisuje zakup. Legacy i stare sesje zawsze
++trafiają na zachowany anchor i NIE uzyskują certyfikacji przez checkout. Ambiguous
++inventory blokuje włączenie konfiguracji; nie używamy czasu nadejścia webhooka
++jako czasu powstania konta. Nie uruchamiać cutoveru, jeżeli nie można dowieść
++pokrycia wszystkich historycznych identyfikatorów. Zmiana konta/środowiska,
++restore lub utrata anchorów unieważnia ten invariant: wyłączyć bootstrap,
++zatrzymać writerów i ponownie uzgodnić dane. Wyłączenie flagi nie cofa już
++nadanych certyfikatów; wymagają osobnego audytu i ewentualnej invalidacji.
++
++## Preflight, współbieżność i fail closed
++
++adminInitiateRefund zachowuje ADMIN, APPROVED, circuit breaker, tryb Stripe,
++rezerwację i idempotency key. Przed rezerwacją i Stripe POST odczytuje cały
++VERIFIED_V1 łańcuch (limit 100, deadline 6 s) i waliduje granty wszystkich
++rekordów, również zwracanych. Rezerwacja zawiera ConditionCheck wersji oraz
++VERIFIED_V1 na Entitlement; konflikt nie wysyła POST. Pozostaje budżet na POST
++z timeoutem 4 s. Rezerwacja zaczyna w NOT_STARTED; ponowne zatwierdzenie ADMIN
++może ją warunkowo przejąć po pełnym preflightcie. Po rozpoczęciu POST nie ma
++automatycznego ponowienia; szczegóły stanów i budżetów poniżej. Późniejszy webhook
++ponownie weryfikuje historię i atomowo aktualizuje wersję. Rezerwacja nie blokuje
++późniejszych legalnych checkoutów. Uprzywilejowana manipulacja po preflightcie
++pozostaje w opisanej granicy zaufania i może wymagać incydentu po refundzie.
++
++Checkout certyfikowanej historii również sprawdza ją przed kalkulacją grantu;
++zmiana odczytanej wersji powoduje ponowną próbę, a commit nadal sprawdza wersję.
++Historie >100 blokują taki checkout oraz refund; wymagają osobnej procedury,
++nie wolno przycinać listy. Legacy pozostają niezweryfikowane: dotychczasowe
++nadanie po checkout działa, ale automatyczne przeliczenie refundu jest zablokowane.
++Fail closed reconciliation oznacza brak nowej kalkulacji i commitu; sam błąd nie
++cofa istniejącego dostępu. Incydent wymagający zawieszenia dostępu ma odrębną
++procedurę operacyjną. SEC-002 Dashboard import i SEC-001 MFA pozostają zachowane.
++
++## IAM i backup — gwarancje infrastruktury
++
++Cztery tabele finansowe mają PITR=true i jawne RemovalPolicy.RETAIN.
++Nie osłabiono backupu. RETAIN zachowuje tabelę przy usunięciu/zastąpieniu przez
++CloudFormation; nie zapobiega DeleteTable przez uprawnionego administratora.
++Stan rzeczywiście wdrożonych zasobów i efektywnego IAM wymaga późniejszej kontroli.
++
++Webhook: Purchase Get/Put; Refund Get/Update; Entitlement Get/Update; Event Get/Put.
++Checkout Lambda nie zapisuje tych tabel finansowych; zapisuje próby checkoutu.
++ADMIN initiate: Purchase Get/ConditionCheck; Refund Get/Put/Update; Entitlement
++Get/ConditionCheck; bez zapisu Event/Entitlement. ADMIN reconcile: Purchase Get,
++Refund Get/Update, Entitlement Get/Update, Event Put. SEC-002 import: dotychczasowe
++Get/ConditionCheck Purchase, Get/Put/Update Refund, Get/Update Entitlement,
++Get/Put Event. ADMIN Cognito nie oznacza bezpośredniego administratora DynamoDB.
++
++Wszystkie granty czterech tabel używają dokładnego ARN tabeli zamiast helpera
++rozszerzającego zakres na index/*. Query list UI i review pozostają na nazwanych
++indeksach. Nie dodano DeleteItem, Scan, wildcard ani samodzielnego uprawnienia
++TransactWriteItems. Transakcje są autoryzowane przez operacje PutItem, UpdateItem
++i ConditionCheckItem zgodnie z [dokumentacją AWS](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis-iam.html).
++Syntetyzowany/effective IAM, permissions boundaries i polityki organizacji nie
++zostały sprawdzone przez AWS; to warunek odbioru wdrożenia.
++
++## Runbook odtworzenia pojedynczego zakupu — NIE WYKONANO
++
++1. Otworzyć incydent; zatrzymać refundy, checkout i migrator dla objętych danych,
++   wyłączyć bootstrap i zabezpieczyć surowe aktualne rekordy, wersje, manifesty,
++   identyfikatory zdarzeń, ślady zmian oraz przyczynę i czas uszkodzenia.
++2. Przy osobnej autoryzacji odtworzyć PITR do NOWEJ izolowanej tabeli z punktu
++   sprzed uszkodzenia. PITR ma ograniczone okno, domyślnie do 35 dni; nie chroni
++   przed korupcją starszą od dostępnego punktu. Nie przełączać aplikacji na
++   starą tabelę i nie zastępować produkcyjnej tabeli snapshotem.
++   [AWS PITR](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Point-in-time-recovery.html).
++3. Niezależny recenzent porównuje kandydat z manifestem, potwierdzoną płatnością
++   Stripe, CheckoutAttempt/Event, stanem refundów i obecnym otoczeniem łańcucha.
++   Backup sam nie dowodzi prawidłowości. Bez dowodu nie odtwarzać i nie naprawiać
++   linków na podstawie założenia. Udokumentować hash przed/po i akceptację.
++4. Warunkowo unieważnić VERIFIED_V1 i zwiększyć aktualną wersję Entitlement.
++   Dla brakującego zakupu użyć Put z attribute_not_exists(PK). Dla uszkodzonego
++   istniejącego rekordu zachować kopię dowodową i użyć warunkowego zastąpienia
++   dokładnie oczekiwanego obrazu/atrybutów uszkodzonego rekordu. Konflikt oznacza
++   STOP i ponowną analizę; nigdy bezwarunkowy overwrite.
++5. Nie cofać Entitlement, Refund, Event ani CheckoutAttempt do punktu backupu.
++   Zachować wszystkie nowsze poprawne zakupy/refundy. Aktualny pełny łańcuch
++   porównać z uzupełnionym niezależnym manifestem i silnie spójnymi odczytami;
++   dopiero potem certyfikować z warunkiem aktualnej wersji i ponownym jej wzrostem.
++6. Zapisać ticket, operatora/recenzenta, źródło i punkt restore, warunki zapisu,
++   raport walidacji i wynik. Wznowić wyłącznie aktualne writery; retry obserwacji
++   z tymi samymi ID, bez nowego refund POST. Bootstrap wymaga ponownego dowodu
++   invariantów. Brak PITR/dowodu/kompletności pozostawia automat zablokowany.
++
++## Budżety wydajności — analiza, bez benchmarku
++
++Dla N zakupów chain potrzebuje N sekwencyjnych consistent GetItem. Refund ma
++ponadto N-1 odczytów refundów (partie po 8), anchor, korelację i transakcję.
++Szacowanie dla samego łańcucha poniżej jest arytmetyką, NIE pomiarem AWS:
++
++| Zakupy | Odczyty chain | przy 10 ms/odczyt | przy 50 ms/odczyt |
++| --- | --- | --- | --- |
++| 1 | 1 | 10 ms | 50 ms |
++| 10 | 10 | 100 ms | 500 ms |
++| 50 | 50 | 500 ms | 2500 ms |
++| 100 | 100 | 1000 ms | 5000 ms |
++
++Nie obejmuje cold startu, pozostałych odczytów, Stripe GET/POST, retry konfliktów
++ani transakcji. Przy wolnych żądaniach nie ma gwarancji zakończenia 100 odczytów:
++6 s preflight, 12 s reconciliation z marginesem 4 s, 20 s webhook, 28 s initiate
++oraz istniejący SEC-002 22 s ograniczają pracę. Timeout kończy operację błędem,
++nie częściowym grantem. Należy później potwierdzić faktyczny timeout resolvera
++AppSync i p95/p99 end-to-end; brak benchmarku i wdrożonej konfiguracji nie pozwala
++potwierdzić zgodności wszystkich scenariuszy. Checkout verified również ponosi
++koszt odczytu całej historii. Nie wprowadzamy dodatkowej architektury bez pomiaru.
++
++Dodatkowe późniejsze testy: usunięta głowa/środek/ogon, zgodnie skrócony łańcuch
++względem manifestu, uszkodzone granty w już zwróconym rekordzie, przekroczenie
++budżetu przed/po rezerwacji, konflikt wersji preflight, bootstrap off/on, konto
++legacy bez Entitlement, niepotwierdzone konto legacy, stara otwarta sesja,
++opóźniony/retry webhook przez cutover, dwa pierwsze checkouty, utrata anchora,
++restore bez nadpisania nowszych transakcji, IAM denial DeleteItem i brak
++niezamierzonych index wildcard. Nie wykonano testów integracyjnych ani E2E.
++
++
++## Finalna korekta ARCH-005 — rezerwacja i budżet initiate
++
++Konfiguracja w repo: Lambda initiate 28 s (wcześniej 30 s), budżet pracy handlera
++25 s względem wejścia do handlera, poniżej limitu żądania AppSync 30 s. Margines
++3 s przed końcem Lambdy i 2 s między Lambdą a AppSync nie stanowi pomiaru cold
++startu ani gwarancji odpowiedzi klientowi. Nie sprawdzono zasobów wdrożonych.
++Stripe: GET PaymentIntent i list refundów po 2 s, POST 4 s, bez retry SDK.
++DynamoDB initiate: jedna próba, połączenie 0,5 s, requestTimeout 1,5 s z
++throwOnRequestTimeout=true. Wspólny read-only preflight historii zachowuje swój
++budżet 6 s i klienta 1/3 s. Rezerwacja wymaga co najmniej 14 s pozostałego
++budżetu, uzbrojenie POST 12 s, sam POST 10 s. Ostatni margines pokrywa POST
++4 s, zapis wyniku 1,5 s, odczyt po wyścigu z webhookiem 1,5 s i zapis niepewności
++1,5 s, zostawiając 1,5 s zapasu. Zbyt wolny preflight kończy się przed rezerwacją.
++To budżety lokalnego oczekiwania: AbortSignal, timeout i utrata odpowiedzi NIE
++potwierdzają rollbacku transakcji ani anulowania operacji po stronie Stripe.
++
++Maszyna stanów:
++
++- Nowy rekord: NOT_STARTED z losowym attemptId i recoveryAudit; powstaje pod
++  warunkiem braku PK w dotychczasowej transakcji walidującej zakup, APPROVED
++  i wersję VERIFIED_V1. createdAt, adminId i dane finansowe są zachowane.
++- Ponowne jawne zatwierdzenie tej samej sesji/reklamacji przez ADMIN może
++  przejąć wyłącznie NOT_STARTED po ponownym pełnym preflightcie (w tym Stripe
++  GET, brak refundów i historia). Transakcja porównuje poprzedni attemptId,
++  asocjacje finansowe, brak stripeRefundId/lastObservation; zmienia token oraz
++  dopisuje operatora, czas i poprzedni token do recoveryAudit. Nie usuwa rekordu.
++- Warunkowe NOT_STARTED -> INITIATING (POST_ARMED) wymaga własnego attemptId
++  i braku obserwacji/refund ID. Dopiero potwierdzony zapis zezwala na POST.
++  Przejęty stary handler nie przejdzie tego warunku. Konkurujące żądanie ADMIN
++  przegrywa CAS; nie wysyła POST. Idempotency key pozostaje bez zmian:
++  poprostumatma:refund:v1:<CheckoutSessionId>.
++- Gdy guard zawiedzie po uzbrojeniu, ale przed wywołaniem SDK POST, właściciel
++  może warunkowo zapisać INITIATING -> NOT_STARTED i CONFIRMED_NOT_STARTED
++  w audycie. Dopiero ten trwały stan dopuszcza następne zatwierdzenie ADMIN.
++- Od wejścia do refunds.create każdy błąd jest konserwatywnie niejednoznaczny:
++  INITIATING -> RECONCILIATION_REQUIRED, bez ponawiania POST. Sukces przechodzi
++  do AWAITING_RECONCILIATION lub wyniku już zapisanego przez webhook.
++  Zapisy wyniku/niepewności wymagają tokena właściciela i odpowiedniego stanu;
++  nie nadpisują obserwacji webhooka. Webhook nadal weryfikuje asocjacje i używa
++  dotychczasowych transakcji; jego zapis uniemożliwia przejęcie NOT_STARTED.
++
++Utrata odpowiedzi uzbrojenia lub śmierć procesu po POST_ARMED może pozostawić
++INITIATING, choć POST faktycznie nie wystartował. Brak POST nie jest wtedy
++udowodniony trwałym stanem: obowiązuje ręczne uzgodnienie. Stare rekordy
++RECONCILIATION_REQUIRED/INITIATING bez nowego dowodu również pozostają zablokowane;
++nie wolno uznać braku refundu w pojedynczym GET za dowód niewysłania POST.
++Nie wprowadzono resetu takich rekordów. Błąd zapisu CONFIRMED_NOT_STARTED
++również pozostawia stan zamknięty. Audyt rośnie przez list_append; osiągnięcie
++limitu rozmiaru elementu blokuje kolejne przejście, zamiast kasować historię.
++
++Ta poprawka nie zmienia cutoveru: PURCHASE_HISTORY_CUTOVER_ID nadal domyślnie
++pusty/OFF, brak backfillu i certyfikacji legacy. Wszystkie powyższe prerequisites
++migracji, manifestu, anchorów i fail-closed pozostają wymagane. Bez wdrożenia
++koszt AWS wynosi zero; po wdrożeniu dochodzi jeden UpdateItem uzbrajający POST,
++a przy recovery transakcyjny UpdateItem zamiast Put i wzrost elementu audytu.
++Brak nowej tabeli, indeksu, usług i uprawnień. Późniejsza weryfikacja w TEST musi
++objąć wyścigi ADMIN/webhook, przerwanie przed/po uzbrojeniu, utratę odpowiedzi,
++niepewny POST oraz pomiar p95/p99 z cold startem. Nie wykonano jej w tej zmianie.
