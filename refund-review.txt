@@ -1,0 +1,2323 @@
+===== REFUND RECONCILIATION =====
+import {
+  DynamoDBClient,
+  GetItemCommand,
+  PutItemCommand,
+  QueryCommand,
+  TransactWriteItemsCommand,
+  type AttributeValue,
+} from "@aws-sdk/client-dynamodb";
+import type Stripe from "stripe";
+import { calculateSurvivingAccess, type PaidPurchase } from "./refund-entitlement";
+
+/*
+ * Financial authorization boundary shared by a SIGNED Stripe webhook and an
+ * explicitly authorized ADMIN-only reconciliation Lambda.
+ *
+ * Never trust metadata alone: compare refund ID, PaymentIntent, amount,
+ * currency, Checkout Session and owner against our private DynamoDB records.
+ */
+const db = new DynamoDBClient({});
+const MAX_PURCHASES_PER_USER = 100;
+const MAX_OPTIMISTIC_RETRIES = 5;
+const SESSION_PATTERN = /^cs_(?:test|live)_[A-Za-z0-9]{8,220}$/;
+const REFUND_PATTERN = /^(?:re|pyr)_[A-Za-z0-9]{8,220}$/;
+const PAYMENT_INTENT_PATTERN = /^pi_[A-Za-z0-9]{8,220}$/;
+
+type Item = Record<string, AttributeValue>;
+type Names = {
+  refunds: string;
+  purchases: string;
+  entitlements: string;
+  events: string;
+};
+type RefundRecord = {
+  sessionId: string;
+  refundId: string | null;
+  paymentIntentId: string;
+  userId: string;
+  amount: number;
+  currency: string;
+  status: string;
+  complaintId: string;
+  lastObservation: number | null;
+};
+type Entitlement = {
+  version: number;
+  lastPurchaseId: string | null;
+  revokedReason: string | null;
+};
+
+function requiredEnvironment(key: string): string {
+  const result = process.env[key]?.trim();
+  if (!result) throw new Error(`Missing refund reconciliation configuration: ${key}`);
+  return result;
+}
+function tableNames(): Names {
+  return {
+    refunds: requiredEnvironment("BILLING_REFUND_TABLE_NAME"),
+    purchases: requiredEnvironment("BILLING_PURCHASE_TABLE_NAME"),
+    entitlements: requiredEnvironment("ENTITLEMENT_TABLE_NAME"),
+    events: requiredEnvironment("STRIPE_EVENT_TABLE_NAME"),
+  };
+}
+function requiredString(item: Item, key: string): string {
+  const val = item[key]?.S;
+  if (!val) throw new Error(`Invalid stored ${key}`);
+  return val;
+}
+function positiveNumber(item: Item, key: string): number {
+  const val = Number(item[key]?.N);
+  if (!Number.isSafeInteger(val) || val <= 0) throw new Error(`Invalid stored ${key}`);
+  return val;
+}
+function normalizedPi(refund: Stripe.Refund): string | null {
+  const value = refund.payment_intent;
+  if (typeof value === "string") return value;
+  return value?.id ?? null;
+}
+function stripeStatus(refund: Stripe.Refund): "SUCCEEDED" | "PENDING" | "FAILED" | "CANCELED" | "REQUIRES_ACTION" {
+  if (refund.status === "succeeded") return "SUCCEEDED";
+  if (refund.status === "pending") return "PENDING";
+  if (refund.status === "failed") return "FAILED";
+  if (refund.status === "canceled") return "CANCELED";
+  if (refund.status === "requires_action") return "REQUIRES_ACTION";
+  throw new Error("Unknown refund status; reconciliation requires review.");
+}
+async function recordEventOnly(names: Names, eventId: string, refund: Stripe.Refund, outcome: string) {
+  try {
+    await db.send(new PutItemCommand({
+      TableName: names.events,
+      Item: {
+        eventId: { S: eventId }, eventType: { S: "REFUND_OBSERVATION" },
+        stripeRefundId: { S: refund.id }, outcome: { S: outcome },
+        processedAt: { S: new Date().toISOString() },
+      },
+      ConditionExpression: "attribute_not_exists(eventId)",
+    }));
+  } catch (error) {
+    if ((error as { name?: string }).name !== "ConditionalCheckFailedException") throw error;
+  }
+}
+async function getRefundRecord(names: Names, sessionId: string): Promise<RefundRecord> {
+  const { Item: record } = await db.send(new GetItemCommand({
+    TableName: names.refunds,
+    Key: { stripeCheckoutSessionId: { S: sessionId } }, ConsistentRead: true,
+  }));
+  if (!record) throw new Error("Refund has no durable reservation; investigate Stripe Dashboard before reconciliation.");
+  const refundId = record.stripeRefundId?.S ?? null;
+  return {
+    sessionId, refundId,
+    complaintId: requiredString(record, "complaintId"),
+    paymentIntentId: requiredString(record, "stripePaymentIntentId"),
+    userId: requiredString(record, "userId"),
+    amount: positiveNumber(record, "amount"),
+    currency: requiredString(record, "currency"),
+    status: requiredString(record, "status"),
+    lastObservation: record.lastObservation?.N ? Number(record.lastObservation.N) : null,
+  };
+}
+async function getPurchase(names: Names, sessionId: string): Promise<Item> {
+  const result = await db.send(new GetItemCommand({
+    TableName: names.purchases,
+    Key: { stripeCheckoutSessionId: { S: sessionId } }, ConsistentRead: true,
+  }));
+  if (!result.Item) throw new Error("Purchased session missing from billing ledger.");
+  return result.Item;
+}
+async function getEntitlement(names: Names, userId: string): Promise<Entitlement> {
+  const { Item: item } = await db.send(new GetItemCommand({
+    TableName: names.entitlements,
+    Key: { userId: { S: userId } }, ConsistentRead: true,
+  }));
+  if (!item) throw new Error("Purchase has no entitlement; requires investigation.");
+  const version = positiveNumber(item, "version");
+  if (requiredString(item, "productCode") !== "PREMIUM") throw new Error("Unexpected entitlement product.");
+  return {
+    version,
+    lastPurchaseId: item.lastPurchaseId?.S ?? null,
+    revokedReason: item.revocationReason?.S ?? null,
+  };
+}
+
+/* Query GSI is eventually consistent. Verify the currently known lastPurchaseId
+ * from a STRONGLY consistent Entitlement so a just-processed checkout cannot
+ * silently disappear from a recalculation. If proof is unavailable: RETRY.
+ * Restrict per-user work to limit Lambda duration and cost abuse.
+ */
+async function readAllPurchases(names: Names, userId: string, requiredPurchaseId: string | null): Promise<Array<{item: Item; sessionId: string}>> {
+  const keys: string[] = [];
+  let cursor: Record<string, AttributeValue> | undefined;
+  do {
+    const result = await db.send(new QueryCommand({
+      TableName: names.purchases, IndexName: "userId-index",
+      KeyConditionExpression: "userId = :userId",
+      ExpressionAttributeValues: { ":userId": { S: userId } },
+      ProjectionExpression: "stripeCheckoutSessionId",
+      ExclusiveStartKey: cursor,
+      Limit: MAX_PURCHASES_PER_USER + 1,
+    }));
+    for (const item of result.Items ?? []) {
+      keys.push(requiredString(item, "stripeCheckoutSessionId"));
+    }
+    if (keys.length > MAX_PURCHASES_PER_USER) throw new Error("Too many purchases for automatic entitlement reconciliation.");
+    cursor = result.LastEvaluatedKey;
+  } while (cursor);
+  if (requiredPurchaseId && !keys.includes(requiredPurchaseId)) {
+    throw new Error("Purchase index is lagging Entitlement; retry reconciliation.");
+  }
+  const purchases: Array<{item: Item; sessionId: string}> = [];
+  // Sequential strongly consistent lookups are bounded at MAX_PURCHASES_PER_USER.
+  for (const sessionId of keys) {
+    const item = await getPurchase(names, sessionId);
+    if (requiredString(item, "userId") !== userId) throw new Error("Owner mismatch in purchase ledger.");
+    purchases.push({ item, sessionId });
+  }
+  return purchases;
+}
+
+export type RefundObservation = { outcome: "SUCCEEDED" | "PENDING" | "FAILED" | "CANCELED" | "REQUIRES_ACTION" | "DUPLICATE"; refundId: string; };
+
+/**
+ * Applies one authoritative refund observation. For webhooks the event must
+ * already be cryptographically verified by the Stripe SDK. For the manual
+ * reconciliation Lambda the refund is freshly retrieved from Stripe API.
+ * No new Refund POST is issued here.
+ */
+export async function applyRefundObservation(refund: Stripe.Refund, eventId: string, observationSeconds: number): Promise<RefundObservation> {
+  if (!/^evt_[A-Za-z0-9]{8,220}$/.test(eventId) && !/^manual_[A-Za-z0-9_-]{8,220}$/.test(eventId)) {
+    throw new Error("Invalid observation identifier.");
+  }
+  if (!REFUND_PATTERN.test(refund.id)) throw new Error("Invalid Stripe refund ID.");
+  if (!Number.isSafeInteger(observationSeconds) || observationSeconds <= 0) {
+    throw new Error("Invalid Stripe observation timestamp.");
+  }
+  const sessionId = refund.metadata?.stripeCheckoutSessionId;
+  const complaintId = refund.metadata?.complaintId;
+  if (!sessionId || !SESSION_PATTERN.test(sessionId) || !complaintId) {
+    throw new Error("Refund missing trusted correlation metadata; needs manual investigation.");
+  }
+  const names = tableNames();
+  const record = await getRefundRecord(names, sessionId);
+  if (
+    record.complaintId !== complaintId ||
+    !PAYMENT_INTENT_PATTERN.test(record.paymentIntentId) ||
+    record.paymentIntentId !== normalizedPi(refund) ||
+    record.currency !== refund.currency ||
+    record.amount !== refund.amount ||
+    (record.refundId !== null && record.refundId !== refund.id)
+  ) {
+    throw new Error("Signed Stripe refund does not match our reserved purchase.");
+  }
+  const purchase = await getPurchase(names, sessionId);
+  if (
+    requiredString(purchase, "stripePaymentIntentId") !== record.paymentIntentId ||
+    requiredString(purchase, "userId") !== record.userId ||
+    requiredString(purchase, "currency") !== record.currency ||
+    positiveNumber(purchase, "amountTotal") !== record.amount
+  ) {
+    throw new Error("Reserved refund does not match immutable paid purchase.");
+  }
+  const currentStripeStatus = stripeStatus(refund);
+  if (record.lastObservation !== null && record.lastObservation > observationSeconds) {
+    if (currentStripeStatus === "SUCCEEDED" && record.status !== "SUCCEEDED") {
+      throw new Error("Out-of-order successful refund requires Stripe API reconciliation.");
+    }
+    await recordEventOnly(names, eventId, refund, "OUT_OF_ORDER_EVENT");
+    return { outcome: "DUPLICATE", refundId: refund.id };
+  }
+  if (record.status === "SUCCEEDED") {
+    if (currentStripeStatus !== "SUCCEEDED") {
+      throw new Error("Stripe observation conflicts with an already settled refund.");
+    }
+    await recordEventOnly(names, eventId, refund, "ALREADY_RECONCILED");
+    return { outcome: "DUPLICATE", refundId: refund.id };
+  }
+  if (["FAILED", "CANCELED"].includes(record.status) && currentStripeStatus === "SUCCEEDED") {
+    throw new Error("Conflicting terminal refund states; manual review required.");
+  }
+  const now = new Date().toISOString();
+  const statusValues = {
+    ":newStatus": { S: currentStripeStatus },
+    ":refundId": { S: refund.id },
+    ":now": { S: now },
+    ":pi": { S: record.paymentIntentId },
+    ":amount": { N: String(record.amount) },
+    ":complaintId": { S: record.complaintId },
+    ":observation": { N: String(observationSeconds) },
+  };
+
+  if (currentStripeStatus !== "SUCCEEDED") {
+    if (["FAILED", "CANCELED"].includes(record.status)) {
+      await recordEventOnly(names, eventId, refund, "TERMINAL_ALREADY_RECORDED");
+      return { outcome: "DUPLICATE", refundId: refund.id };
+    }
+    try {
+      await db.send(new TransactWriteItemsCommand({ TransactItems: [
+        { Put: { TableName: names.events, Item: {
+          eventId: { S: eventId }, eventType: { S: "REFUND_OBSERVATION" },
+          stripeRefundId: { S: refund.id }, outcome: { S: currentStripeStatus },
+          processedAt: { S: now },
+        }, ConditionExpression: "attribute_not_exists(eventId)" } },
+        { Update: { TableName: names.refunds,
+          Key: { stripeCheckoutSessionId: { S: sessionId } },
+          ConditionExpression: "#status <> :succeeded AND (attribute_not_exists(stripeRefundId) OR stripeRefundId = :refundId) AND (attribute_not_exists(lastObservation) OR lastObservation <= :observation) AND stripePaymentIntentId = :pi AND amount = :amount AND complaintId = :complaintId",
+          UpdateExpression: "SET #status = :newStatus, stripeRefundId = :refundId, stripeStatus = :newStatus, lastObservation = :observation, updatedAt = :now",
+          ExpressionAttributeNames: { "#status": "status" },
+          ExpressionAttributeValues: { ...statusValues, ":succeeded": { S: "SUCCEEDED" } },
+        } },
+      ] }));
+    } catch (error) {
+      if ((error as {name?: string}).name === "TransactionCanceledException") {
+        const latest = await getRefundRecord(names, sessionId);
+        if (latest.status === "SUCCEEDED" || latest.status === currentStripeStatus ||
+            (latest.lastObservation !== null && latest.lastObservation > observationSeconds)) {
+          return { outcome: "DUPLICATE", refundId: refund.id };
+        }
+      }
+      throw error;
+    }
+    return { outcome: currentStripeStatus, refundId: refund.id };
+  }
+
+  for (let attempt = 0; attempt < MAX_OPTIMISTIC_RETRIES; attempt++) {
+    const latest = await getRefundRecord(names, sessionId);
+    if (latest.lastObservation !== null && latest.lastObservation > observationSeconds) {
+      if (latest.status !== "SUCCEEDED") {
+        throw new Error("Out-of-order successful refund requires Stripe API reconciliation.");
+      }
+      await recordEventOnly(names, eventId, refund, "OUT_OF_ORDER_EVENT");
+      return { outcome: "DUPLICATE", refundId: refund.id };
+    }
+    if (latest.status === "SUCCEEDED") {
+      await recordEventOnly(names, eventId, refund, "ALREADY_RECONCILED");
+      return { outcome: "DUPLICATE", refundId: refund.id };
+    }
+    if (["FAILED", "CANCELED"].includes(latest.status)) throw new Error("Cannot reconcile conflicting terminal refund.");
+
+    const entitlement = await getEntitlement(names, record.userId);
+    if (entitlement.revokedReason && entitlement.revokedReason !== "REFUND_RECONCILIATION") {
+      throw new Error("Entitlement already revoked for another reason; requires manual review.");
+    }
+    const allPurchases = await readAllPurchases(names, record.userId, entitlement.lastPurchaseId);
+    if (!allPurchases.some(({sessionId: id}) => id === sessionId)) throw new Error("Refunded purchase missing from GSI; retry.");
+    const survivors: PaidPurchase[] = [];
+    for (const {item, sessionId: id} of allPurchases) {
+      if (id === sessionId) continue;
+      const other = await db.send(new GetItemCommand({
+        TableName: names.refunds,
+        Key: { stripeCheckoutSessionId: { S: id } }, ConsistentRead: true,
+        ProjectionExpression: "#status",
+        ExpressionAttributeNames: { "#status": "status" },
+      }));
+      if (other.Item?.status?.S === "SUCCEEDED") continue;
+      survivors.push({
+        stripeCheckoutSessionId: id,
+        paidAt: requiredString(item, "paidAt"),
+        grantedFrom: requiredString(item, "grantedFrom"),
+        accessDays: positiveNumber(item, "accessDays"),
+      });
+    }
+    const calculated = calculateSurvivingAccess(survivors);
+    const noAccess = calculated.accessUntil === null;
+    const updatePieces = ["accessUntil = :until", "updatedAt = :now", "#version = :next", "#source = :source"];
+    const removals: string[] = [];
+    const accessValues: Record<string, AttributeValue> = {
+      ":until": { S: calculated.accessUntil ?? now },
+      ":now": { S: now }, ":next": { N: String(entitlement.version + 1) },
+      ":previous": { N: String(entitlement.version) },
+      ":source": { S: "STRIPE_ONE_TIME" },
+    };
+    if (noAccess) {
+      updatePieces.push("revokedAt = :now", "revocationReason = :revocationReason");
+      accessValues[":revocationReason"] = { S: "REFUND_RECONCILIATION" };
+      removals.push("lastPurchaseId");
+    } else {
+      if (!calculated.lastPurchaseId) throw new Error("Inconsistent access calculation.");
+      updatePieces.push("lastPurchaseId = :lastPurchaseId");
+      accessValues[":lastPurchaseId"] = { S: calculated.lastPurchaseId };
+      removals.push("revokedAt", "revocationReason");
+    }
+    const updateExpression = `SET ${updatePieces.join(", ")}${removals.length ? ` REMOVE ${removals.join(", ")}` : ""}`;
+
+    try {
+      await db.send(new TransactWriteItemsCommand({ TransactItems: [
+        { Put: { TableName: names.events, Item: {
+          eventId: { S: eventId }, eventType: { S: "REFUND_OBSERVATION" },
+          stripeRefundId: { S: refund.id }, outcome: { S: "REFUND_SUCCEEDED" },
+          processedAt: { S: now },
+        }, ConditionExpression: "attribute_not_exists(eventId)" } },
+        { Update: { TableName: names.refunds,
+          Key: { stripeCheckoutSessionId: { S: sessionId } },
+          ConditionExpression: "#status <> :succeeded AND (attribute_not_exists(stripeRefundId) OR stripeRefundId = :refundId) AND (attribute_not_exists(lastObservation) OR lastObservation <= :observation) AND stripePaymentIntentId = :pi AND amount = :amount AND complaintId = :complaintId",
+          UpdateExpression: "SET #status = :newStatus, stripeRefundId = :refundId, stripeStatus = :newStatus, lastObservation = :observation, updatedAt = :now, succeededAt = :now",
+          ExpressionAttributeNames: { "#status": "status" },
+          ExpressionAttributeValues: { ...statusValues, ":succeeded": { S: "SUCCEEDED" } },
+        } },
+        { Update: { TableName: names.entitlements,
+          Key: { userId: { S: record.userId } },
+          ConditionExpression: "#version = :previous",
+          UpdateExpression: updateExpression,
+          ExpressionAttributeNames: { "#version": "version", "#source": "source" },
+          ExpressionAttributeValues: accessValues,
+        } },
+      ] }));
+      return { outcome: "SUCCEEDED", refundId: refund.id };
+    } catch (error) {
+      if ((error as {name?: string}).name !== "TransactionCanceledException") throw error;
+      const latestRecord = await getRefundRecord(names, sessionId);
+      if (latestRecord.status === "SUCCEEDED") {
+        return { outcome: "DUPLICATE", refundId: refund.id };
+      }
+      if (latestRecord.lastObservation !== null && latestRecord.lastObservation > observationSeconds) {
+        throw new Error("Out-of-order successful refund requires Stripe API reconciliation.");
+      }
+      // Could also be a concurrent new purchase: re-read entitlement and retry.
+    }
+  }
+  throw new Error("Concurrent purchases prevented safe reconciliation; retry later.");
+}
+===== REFUND WEBHOOK =====
+import {
+  DynamoDBClient,
+  GetItemCommand,
+  PutItemCommand,
+  TransactWriteItemsCommand,
+  type AttributeValue,
+} from "@aws-sdk/client-dynamodb";
+
+import type {
+  APIGatewayProxyEventV2,
+  APIGatewayProxyHandlerV2,
+} from "aws-lambda";
+
+import Stripe from "stripe";
+import { applyRefundObservation } from "../../shared/refund-reconciliation";
+
+import {
+  env,
+} from "$amplify/env/stripe-webhook";
+
+const dynamoDb =
+  new DynamoDBClient({});
+
+const REFUND_EVENT_TYPES = new Set(["refund.created", "refund.updated", "refund.failed"]);
+
+const ALLOWED_EVENT_TYPES =
+  new Set([
+    "checkout.session.completed",
+    "checkout.session.async_payment_succeeded",
+    "checkout.session.async_payment_failed",
+  ]);
+
+const MILLISECONDS_PER_DAY =
+  24 * 60 * 60 * 1000;
+
+const MAX_ENTITLEMENT_RETRIES =
+  3;
+
+class WebhookContractError extends Error {
+  constructor(
+    public readonly code: string,
+  ) {
+    super(code);
+    this.name =
+      "WebhookContractError";
+  }
+}
+
+type CheckoutAttemptSnapshot = {
+  checkoutAttemptId: string;
+  userId: string;
+  stripeCustomerId: string;
+  planCode: string;
+  billingContractVersion: string;
+  stripePriceId: string;
+  amountTotal: number;
+  currency: string;
+  checkoutMode: "payment";
+  accessDays: number;
+  termsVersion: string;
+  privacyVersion: string;
+  checkoutConsentVersion: string;
+  immediateDeliveryConsent: true;
+  withdrawalRightLossAcknowledged: true;
+  consentedAt: string;
+  status: "CREATED" | "PAID";
+};
+
+type VerifiedCheckout = {
+  session: Stripe.Checkout.Session;
+  attempt: CheckoutAttemptSnapshot;
+};
+
+type EntitlementSnapshot =
+  | {
+      exists: false;
+    }
+  | {
+      exists: true;
+      accessUntil: string;
+      revokedAt: string | null;
+      version: number;
+    };
+
+function requireRuntimeEnvironmentVariable(
+  name: string,
+): string {
+  const value =
+    process.env[name]
+      ?.trim();
+
+  if (!value) {
+    throw new Error(
+      `Missing required runtime environment variable: ${name}.`,
+    );
+  }
+
+  return value;
+}
+
+/*
+ * Table names are injected by backend.ts after the Amplify function
+ * definition is created. Reading them from process.env avoids coupling
+ * runtime code to stale generated $amplify/env typings.
+ */
+const billingCustomerTableName =
+  requireRuntimeEnvironmentVariable(
+    "BILLING_CUSTOMER_TABLE_NAME",
+  );
+
+const stripeEventTableName =
+  requireRuntimeEnvironmentVariable(
+    "STRIPE_EVENT_TABLE_NAME",
+  );
+
+const billingPurchaseTableName =
+  requireRuntimeEnvironmentVariable(
+    "BILLING_PURCHASE_TABLE_NAME",
+  );
+
+const entitlementTableName =
+  requireRuntimeEnvironmentVariable(
+    "ENTITLEMENT_TABLE_NAME",
+  );
+
+const checkoutAttemptTableName =
+  requireRuntimeEnvironmentVariable(
+    "CHECKOUT_ATTEMPT_TABLE_NAME",
+  );
+
+function jsonResponse(
+  statusCode: number,
+  body: Record<string, unknown>,
+) {
+  return {
+    statusCode,
+
+    headers: {
+      "content-type":
+        "application/json",
+    },
+
+    body:
+      JSON.stringify(body),
+  };
+}
+
+function getRawBody(
+  event: APIGatewayProxyEventV2,
+): string | Buffer {
+  if (
+    typeof event.body !== "string"
+  ) {
+    throw new Error(
+      "Missing webhook body.",
+    );
+  }
+
+  if (event.isBase64Encoded) {
+    return Buffer.from(
+      event.body,
+      "base64",
+    );
+  }
+
+  return event.body;
+}
+
+function getStripeSignature(
+  event: APIGatewayProxyEventV2,
+): string | null {
+  return (
+    event.headers[
+      "stripe-signature"
+    ] ??
+    event.headers[
+      "Stripe-Signature"
+    ] ??
+    null
+  );
+}
+
+function getExpectedLivemode():
+  boolean {
+  const value =
+    env
+      .STRIPE_EXPECTED_LIVEMODE;
+
+  if (value === "true") {
+    return true;
+  }
+
+  if (value === "false") {
+    return false;
+  }
+
+  throw new Error(
+    "Invalid STRIPE_EXPECTED_LIVEMODE configuration.",
+  );
+}
+
+function requireMetadata(
+  session: Stripe.Checkout.Session,
+  key: string,
+): string {
+  const value =
+    session.metadata?.[
+      key
+    ]?.trim();
+
+  if (!value) {
+    throw new WebhookContractError(
+      `missing_metadata_${key}`,
+    );
+  }
+
+  return value;
+}
+
+function getStripeCustomerId(
+  session:
+    Stripe.Checkout.Session,
+): string {
+  const customer =
+    session.customer;
+
+  if (
+    typeof customer ===
+    "string"
+  ) {
+    return customer;
+  }
+
+  if (
+    customer &&
+    typeof customer.id ===
+      "string"
+  ) {
+    return customer.id;
+  }
+
+  throw new WebhookContractError(
+    "missing_customer",
+  );
+}
+
+function getPaymentIntentId(
+  session:
+    Stripe.Checkout.Session,
+): string {
+  const paymentIntent =
+    session.payment_intent;
+
+  /*
+   * Stripe may return only the PaymentIntent ID.
+   */
+  if (
+    typeof paymentIntent ===
+    "string"
+  ) {
+    if (
+      paymentIntent.startsWith(
+        "pi_",
+      )
+    ) {
+      return paymentIntent;
+    }
+
+    throw new WebhookContractError(
+      "invalid_payment_intent",
+    );
+  }
+
+  /*
+   * Or Stripe may return an expanded PaymentIntent object.
+   *
+   * At this point TypeScript already knows that paymentIntent
+   * cannot be a string.
+   */
+  if (
+    paymentIntent &&
+    typeof paymentIntent.id ===
+      "string" &&
+    paymentIntent.id.startsWith(
+      "pi_",
+    )
+  ) {
+    return paymentIntent.id;
+  }
+
+  /*
+   * A successfully paid one-time Checkout must have a usable
+   * PaymentIntent because refunds are later anchored to it.
+   */
+  throw new WebhookContractError(
+    "missing_payment_intent",
+  );
+}
+
+function isCanonicalIsoTimestamp(
+  value: string,
+): boolean {
+  const timestamp =
+    Date.parse(value);
+
+  if (
+    !Number.isFinite(
+      timestamp,
+    )
+  ) {
+    return false;
+  }
+
+  return (
+    new Date(timestamp)
+      .toISOString() === value
+  );
+}
+
+function getRequiredStringAttribute(
+  item: Record<string, AttributeValue>,
+  fieldName: string,
+): string {
+  const value =
+    item[fieldName];
+
+  if (
+    !value ||
+    !("S" in value) ||
+    typeof value.S !== "string" ||
+    !value.S.trim()
+  ) {
+    throw new Error(
+      `Invalid CheckoutAttempt.${fieldName}.`,
+    );
+  }
+
+  return value.S.trim();
+}
+
+function getRequiredPositiveIntegerAttribute(
+  item: Record<string, AttributeValue>,
+  fieldName: string,
+): number {
+  const value =
+    item[fieldName];
+
+  if (
+    !value ||
+    !("N" in value) ||
+    typeof value.N !== "string"
+  ) {
+    throw new Error(
+      `Invalid CheckoutAttempt.${fieldName}.`,
+    );
+  }
+
+  const parsed =
+    Number(value.N);
+
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed <= 0
+  ) {
+    throw new Error(
+      `Invalid CheckoutAttempt.${fieldName}.`,
+    );
+  }
+
+  return parsed;
+}
+
+function getRequiredTrueBooleanAttribute(
+  item: Record<string, AttributeValue>,
+  fieldName: string,
+): true {
+  const value =
+    item[fieldName];
+
+  if (
+    !value ||
+    !("BOOL" in value) ||
+    value.BOOL !== true
+  ) {
+    throw new Error(
+      `Invalid CheckoutAttempt.${fieldName}.`,
+    );
+  }
+
+  return true;
+}
+
+async function getCheckoutAttempt(
+  checkoutAttemptId: string,
+): Promise<CheckoutAttemptSnapshot> {
+  const response =
+    await dynamoDb.send(
+      new GetItemCommand({
+        TableName:
+          checkoutAttemptTableName,
+
+        Key: {
+          checkoutAttemptId: {
+            S:
+              checkoutAttemptId,
+          },
+        },
+
+        ConsistentRead:
+          true,
+      }),
+    );
+
+  const item =
+    response.Item;
+
+  if (!item) {
+    throw new WebhookContractError(
+      "checkout_attempt_not_found",
+    );
+  }
+
+  const storedAttemptId =
+    getRequiredStringAttribute(
+      item,
+      "checkoutAttemptId",
+    );
+
+  if (
+    storedAttemptId !==
+      checkoutAttemptId
+  ) {
+    throw new Error(
+      "CheckoutAttempt primary key mismatch.",
+    );
+  }
+
+  const checkoutMode =
+    getRequiredStringAttribute(
+      item,
+      "checkoutMode",
+    );
+
+  if (
+    checkoutMode !== "payment"
+  ) {
+    throw new Error(
+      "Invalid CheckoutAttempt.checkoutMode.",
+    );
+  }
+
+  const currency =
+    getRequiredStringAttribute(
+      item,
+      "currency",
+    );
+
+  if (
+    !/^[a-z]{3}$/.test(
+      currency,
+    )
+  ) {
+    throw new Error(
+      "Invalid CheckoutAttempt.currency.",
+    );
+  }
+
+  const consentedAt =
+    getRequiredStringAttribute(
+      item,
+      "consentedAt",
+    );
+
+  if (
+    !isCanonicalIsoTimestamp(
+      consentedAt,
+    )
+  ) {
+    throw new Error(
+      "Invalid CheckoutAttempt.consentedAt.",
+    );
+  }
+
+  const rawStatus =
+    getRequiredStringAttribute(
+      item,
+      "status",
+    );
+
+  if (
+    rawStatus !== "CREATED" &&
+    rawStatus !== "PAID"
+  ) {
+    throw new Error(
+      "Invalid CheckoutAttempt.status.",
+    );
+  }
+
+  return {
+    checkoutAttemptId:
+      storedAttemptId,
+
+    userId:
+      getRequiredStringAttribute(
+        item,
+        "userId",
+      ),
+
+    stripeCustomerId:
+      getRequiredStringAttribute(
+        item,
+        "stripeCustomerId",
+      ),
+
+    planCode:
+      getRequiredStringAttribute(
+        item,
+        "planCode",
+      ),
+
+    billingContractVersion:
+      getRequiredStringAttribute(
+        item,
+        "billingContractVersion",
+      ),
+
+    stripePriceId:
+      getRequiredStringAttribute(
+        item,
+        "stripePriceId",
+      ),
+
+    amountTotal:
+      getRequiredPositiveIntegerAttribute(
+        item,
+        "amountTotal",
+      ),
+
+    currency,
+
+    checkoutMode,
+
+    accessDays:
+      getRequiredPositiveIntegerAttribute(
+        item,
+        "accessDays",
+      ),
+
+    termsVersion:
+      getRequiredStringAttribute(
+        item,
+        "termsVersion",
+      ),
+
+    privacyVersion:
+      getRequiredStringAttribute(
+        item,
+        "privacyVersion",
+      ),
+
+    checkoutConsentVersion:
+      getRequiredStringAttribute(
+        item,
+        "checkoutConsentVersion",
+      ),
+
+    immediateDeliveryConsent:
+      getRequiredTrueBooleanAttribute(
+        item,
+        "immediateDeliveryConsent",
+      ),
+
+    withdrawalRightLossAcknowledged:
+      getRequiredTrueBooleanAttribute(
+        item,
+        "withdrawalRightLossAcknowledged",
+      ),
+
+    consentedAt,
+
+    status:
+      rawStatus,
+  };
+}
+
+async function getStoredCustomerId(
+  userId: string,
+): Promise<string | null> {
+  const response =
+    await dynamoDb.send(
+      new GetItemCommand({
+        TableName:
+          billingCustomerTableName,
+
+        Key: {
+          userId: {
+            S: userId,
+          },
+        },
+
+        ProjectionExpression:
+          "stripeCustomerId",
+
+        ConsistentRead:
+          true,
+      }),
+    );
+
+  return (
+    response.Item
+      ?.stripeCustomerId
+      ?.S
+      ?.trim() ??
+    null
+  );
+}
+
+/*
+ * The CheckoutAttempt is the historical source of truth for the contract
+ * used to create this session. No comparison is made against the CURRENT
+ * BILLING_PLANS or CURRENT billing contract version, so an in-flight valid
+ * checkout remains fulfillable after a future price/configuration deploy.
+ */
+async function verifyCheckoutContract(
+  stripeEvent: Stripe.Event,
+): Promise<VerifiedCheckout> {
+  const session =
+    stripeEvent.data.object as
+      Stripe.Checkout.Session;
+
+  const expectedLivemode =
+    getExpectedLivemode();
+
+  if (
+    stripeEvent.livemode !==
+      expectedLivemode ||
+    session.livemode !==
+      expectedLivemode
+  ) {
+    throw new WebhookContractError(
+      "wrong_livemode",
+    );
+  }
+
+  if (
+    typeof session.id !== "string" ||
+    !session.id.startsWith(
+      "cs_",
+    )
+  ) {
+    throw new WebhookContractError(
+      "invalid_checkout_session_id",
+    );
+  }
+
+  if (
+    session.status !==
+      "complete"
+  ) {
+    throw new WebhookContractError(
+      "checkout_not_complete",
+    );
+  }
+
+  const checkoutAttemptId =
+    requireMetadata(
+      session,
+      "checkoutAttemptId",
+    );
+
+  const attempt =
+    await getCheckoutAttempt(
+      checkoutAttemptId,
+    );
+
+  if (
+    session.mode !==
+      attempt.checkoutMode
+  ) {
+    throw new WebhookContractError(
+      "wrong_checkout_mode",
+    );
+  }
+
+  if (
+    session.currency !==
+      attempt.currency ||
+    session.amount_total !==
+      attempt.amountTotal
+  ) {
+    throw new WebhookContractError(
+      "wrong_amount_or_currency",
+    );
+  }
+
+  const metadataChecks:
+    Array<[
+      string,
+      string,
+    ]> = [
+      [
+        "appUserId",
+        attempt.userId,
+      ],
+      [
+        "planCode",
+        attempt.planCode,
+      ],
+      [
+        "billingContractVersion",
+        attempt.billingContractVersion,
+      ],
+      [
+        "stripePriceId",
+        attempt.stripePriceId,
+      ],
+      [
+        "termsVersion",
+        attempt.termsVersion,
+      ],
+      [
+        "privacyVersion",
+        attempt.privacyVersion,
+      ],
+      [
+        "checkoutConsentVersion",
+        attempt.checkoutConsentVersion,
+      ],
+    ];
+
+  for (
+    const [
+      key,
+      expectedValue,
+    ] of metadataChecks
+  ) {
+    if (
+      requireMetadata(
+        session,
+        key,
+      ) !== expectedValue
+    ) {
+      throw new WebhookContractError(
+        `metadata_mismatch_${key}`,
+      );
+    }
+  }
+
+  if (
+    session
+      .client_reference_id !==
+    attempt.userId
+  ) {
+    throw new WebhookContractError(
+      "user_reference_mismatch",
+    );
+  }
+
+  const stripeCustomerId =
+    getStripeCustomerId(
+      session,
+    );
+
+  if (
+    stripeCustomerId !==
+      attempt.stripeCustomerId
+  ) {
+    throw new WebhookContractError(
+      "checkout_attempt_customer_mismatch",
+    );
+  }
+
+  const storedCustomerId =
+    await getStoredCustomerId(
+      attempt.userId,
+    );
+
+  if (
+    !storedCustomerId ||
+    storedCustomerId !==
+      stripeCustomerId
+  ) {
+    throw new WebhookContractError(
+      "customer_mapping_mismatch",
+    );
+  }
+
+  return {
+    session,
+    attempt,
+  };
+}
+
+function isConditionalFailure(
+  error: unknown,
+): boolean {
+  return (
+    typeof error ===
+      "object" &&
+    error !== null &&
+    "name" in error &&
+    (
+      error as {
+        name?: unknown;
+      }
+    ).name ===
+      "ConditionalCheckFailedException"
+  );
+}
+
+function isTransactionCanceled(
+  error: unknown,
+): boolean {
+  return (
+    typeof error ===
+      "object" &&
+    error !== null &&
+    "name" in error &&
+    (
+      error as {
+        name?: unknown;
+      }
+    ).name ===
+      "TransactionCanceledException"
+  );
+}
+
+async function recordEventOnly(
+  stripeEvent: Stripe.Event,
+  checkoutAttemptId: string,
+  sessionId: string,
+  outcome: string,
+): Promise<void> {
+  try {
+    await dynamoDb.send(
+      new PutItemCommand({
+        TableName:
+          stripeEventTableName,
+
+        Item: {
+          eventId: {
+            S: stripeEvent.id,
+          },
+
+          eventType: {
+            S: stripeEvent.type,
+          },
+
+          stripeCreatedAt: {
+            N: String(
+              stripeEvent.created,
+            ),
+          },
+
+          processedAt: {
+            S:
+              new Date()
+                .toISOString(),
+          },
+
+          checkoutAttemptId: {
+            S:
+              checkoutAttemptId,
+          },
+
+          checkoutSessionId: {
+            S: sessionId,
+          },
+
+          outcome: {
+            S: outcome,
+          },
+        },
+
+        ConditionExpression:
+          "attribute_not_exists(eventId)",
+      }),
+    );
+  } catch (error) {
+    if (
+      isConditionalFailure(
+        error,
+      )
+    ) {
+      return;
+    }
+
+    throw error;
+  }
+}
+
+async function getEntitlement(
+  userId: string,
+): Promise<EntitlementSnapshot> {
+  const response =
+    await dynamoDb.send(
+      new GetItemCommand({
+        TableName:
+          entitlementTableName,
+
+        Key: {
+          userId: {
+            S: userId,
+          },
+        },
+
+        ProjectionExpression:
+          "accessUntil, revokedAt, #version",
+
+        ExpressionAttributeNames: {
+          "#version":
+            "version",
+        },
+
+        ConsistentRead:
+          true,
+      }),
+    );
+
+  if (!response.Item) {
+    return {
+      exists: false,
+    };
+  }
+
+  const accessUntil =
+    response.Item
+      .accessUntil
+      ?.S;
+
+  const versionText =
+    response.Item
+      .version
+      ?.N;
+
+  if (
+    !accessUntil ||
+    !versionText ||
+    !isCanonicalIsoTimestamp(
+      accessUntil,
+    )
+  ) {
+    throw new Error(
+      "Invalid entitlement record.",
+    );
+  }
+
+  const version =
+    Number(
+      versionText,
+    );
+
+  if (
+    !Number.isSafeInteger(
+      version,
+    ) ||
+    version < 1
+  ) {
+    throw new Error(
+      "Invalid entitlement record.",
+    );
+  }
+
+  return {
+    exists: true,
+    accessUntil,
+    revokedAt:
+      response.Item
+        .revokedAt
+        ?.S ??
+      null,
+    version,
+  };
+}
+
+function calculateGrantPeriod(
+  entitlement:
+    EntitlementSnapshot,
+  accessDays: number,
+  paidAt:
+    Date,
+) {
+  const paidAtMs =
+    paidAt.getTime();
+
+  if (
+    !Number.isFinite(
+      paidAtMs,
+    )
+  ) {
+    throw new Error(
+      "Invalid payment timestamp.",
+    );
+  }
+
+  let baseMs =
+    paidAtMs;
+
+  if (
+    entitlement.exists &&
+    !entitlement.revokedAt
+  ) {
+    const currentUntilMs =
+      Date.parse(
+        entitlement
+          .accessUntil,
+      );
+
+    if (
+      currentUntilMs >
+      paidAtMs
+    ) {
+      baseMs =
+        currentUntilMs;
+    }
+  }
+
+  const untilMs =
+    baseMs +
+    accessDays *
+      MILLISECONDS_PER_DAY;
+
+  if (
+    !Number.isFinite(
+      untilMs,
+    )
+  ) {
+    throw new Error(
+      "Invalid entitlement grant period.",
+    );
+  }
+
+  return {
+    grantedFrom:
+      new Date(
+        baseMs,
+      ).toISOString(),
+
+    grantedUntil:
+      new Date(
+        untilMs,
+      ).toISOString(),
+  };
+}
+
+async function itemExists(
+  tableName: string,
+  keyName: string,
+  keyValue: string,
+): Promise<boolean> {
+  const response =
+    await dynamoDb.send(
+      new GetItemCommand({
+        TableName:
+          tableName,
+
+        Key: {
+          [keyName]: {
+            S: keyValue,
+          },
+        },
+
+        ProjectionExpression:
+          keyName,
+
+        ConsistentRead:
+          true,
+      }),
+    );
+
+  return Boolean(
+    response.Item,
+  );
+}
+
+async function grantOneTimeAccess(
+  stripeEvent: Stripe.Event,
+  checkout:
+    VerifiedCheckout,
+): Promise<
+  "granted" | "duplicate"
+> {
+  const {
+    session,
+    attempt,
+  } =
+    checkout;
+
+  if (
+    attempt.status === "PAID"
+  ) {
+    const purchaseAlreadyExists =
+      await itemExists(
+        billingPurchaseTableName,
+        "stripeCheckoutSessionId",
+        session.id,
+      );
+
+    if (purchaseAlreadyExists) {
+      return "duplicate";
+    }
+
+    throw new Error(
+      "CheckoutAttempt is PAID but BillingPurchase is missing.",
+    );
+  }
+
+  const paidAt =
+    new Date(
+      stripeEvent.created *
+        1000,
+    );
+
+  const paidAtIso =
+    paidAt.toISOString();
+
+  const paymentIntentId =
+    getPaymentIntentId(
+      session,
+    );
+
+  for (
+    let retry = 0;
+    retry <
+      MAX_ENTITLEMENT_RETRIES;
+    retry += 1
+  ) {
+    const entitlement =
+      await getEntitlement(
+        attempt.userId,
+      );
+
+    const {
+      grantedFrom,
+      grantedUntil,
+    } =
+      calculateGrantPeriod(
+        entitlement,
+        attempt.accessDays,
+        paidAt,
+      );
+
+    const processedAt =
+      new Date()
+        .toISOString();
+
+    const entitlementValues:
+      Record<
+        string,
+        AttributeValue
+      > = {
+        ":productCode": {
+          S: "PREMIUM",
+        },
+
+        ":accessUntil": {
+          S: grantedUntil,
+        },
+
+        ":source": {
+          S:
+            "STRIPE_ONE_TIME",
+        },
+
+        ":updatedAt": {
+          S: processedAt,
+        },
+
+        ":newVersion": {
+          N: String(
+            entitlement.exists
+              ? entitlement.version +
+                  1
+              : 1,
+          ),
+        },
+
+        ":purchaseId": {
+          S: session.id,
+        },
+      };
+
+    let entitlementCondition:
+      string;
+
+    if (
+      entitlement.exists
+    ) {
+      entitlementCondition =
+        "#version = :expectedVersion";
+
+      entitlementValues[
+        ":expectedVersion"
+      ] = {
+        N: String(
+          entitlement.version,
+        ),
+      };
+    } else {
+      entitlementCondition =
+        "attribute_not_exists(userId)";
+    }
+
+    try {
+      await dynamoDb.send(
+        new TransactWriteItemsCommand({
+          TransactItems: [
+            {
+              Put: {
+                TableName:
+                  stripeEventTableName,
+
+                Item: {
+                  eventId: {
+                    S:
+                      stripeEvent.id,
+                  },
+
+                  eventType: {
+                    S:
+                      stripeEvent.type,
+                  },
+
+                  stripeCreatedAt: {
+                    N: String(
+                      stripeEvent
+                        .created,
+                    ),
+                  },
+
+                  processedAt: {
+                    S:
+                      processedAt,
+                  },
+
+                  checkoutAttemptId: {
+                    S:
+                      attempt
+                        .checkoutAttemptId,
+                  },
+
+                  checkoutSessionId: {
+                    S:
+                      session.id,
+                  },
+
+                  outcome: {
+                    S:
+                      "ACCESS_GRANTED",
+                  },
+                },
+
+                ConditionExpression:
+                  "attribute_not_exists(eventId)",
+              },
+            },
+
+            {
+              Put: {
+                TableName:
+                  billingPurchaseTableName,
+
+                Item: {
+                  stripeCheckoutSessionId:
+                    {
+                      S:
+                        session.id,
+                    },
+
+                  checkoutAttemptId: {
+                    S:
+                      attempt
+                        .checkoutAttemptId,
+                  },
+
+                  userId: {
+                    S:
+                      attempt.userId,
+                  },
+
+                  stripeCustomerId: {
+                    S:
+                      attempt
+                        .stripeCustomerId,
+                  },
+
+                  stripePaymentIntentId: {
+                    S:
+                      paymentIntentId,
+                  },
+
+                  planCode: {
+                    S:
+                      attempt.planCode,
+                  },
+
+                  billingContractVersion: {
+                    S:
+                      attempt
+                        .billingContractVersion,
+                  },
+
+                  stripePriceId: {
+                    S:
+                      attempt
+                        .stripePriceId,
+                  },
+
+                  amountTotal: {
+                    N: String(
+                      attempt
+                        .amountTotal,
+                    ),
+                  },
+
+                  currency: {
+                    S:
+                      attempt.currency,
+                  },
+
+                  paidAt: {
+                    S:
+                      paidAtIso,
+                  },
+
+                  accessDays: {
+                    N: String(
+                      attempt
+                        .accessDays,
+                    ),
+                  },
+
+                  grantedFrom: {
+                    S:
+                      grantedFrom,
+                  },
+
+                  grantedUntil: {
+                    S:
+                      grantedUntil,
+                  },
+
+                  eventId: {
+                    S:
+                      stripeEvent.id,
+                  },
+
+                  termsVersion: {
+                    S:
+                      attempt
+                        .termsVersion,
+                  },
+
+                  privacyVersion: {
+                    S:
+                      attempt
+                        .privacyVersion,
+                  },
+
+                  checkoutConsentVersion: {
+                    S:
+                      attempt
+                        .checkoutConsentVersion,
+                  },
+
+                  immediateDeliveryConsent: {
+                    BOOL:
+                      true,
+                  },
+
+                  withdrawalRightLossAcknowledged:
+                    {
+                      BOOL:
+                        true,
+                    },
+
+                  consentedAt: {
+                    S:
+                      attempt
+                        .consentedAt,
+                  },
+                },
+
+                ConditionExpression:
+                  "attribute_not_exists(stripeCheckoutSessionId)",
+              },
+            },
+
+            {
+              Update: {
+                TableName:
+                  entitlementTableName,
+
+                Key: {
+                  userId: {
+                    S:
+                      attempt.userId,
+                  },
+                },
+
+                UpdateExpression:
+                  "SET productCode = :productCode, " +
+                  "accessUntil = :accessUntil, " +
+                  "#source = :source, " +
+                  "updatedAt = :updatedAt, " +
+                  "#version = :newVersion, " +
+                  "lastPurchaseId = :purchaseId " +
+                  "REMOVE revokedAt, revocationReason",
+
+                ConditionExpression:
+                  entitlementCondition,
+
+                ExpressionAttributeNames: {
+                  "#source":
+                    "source",
+                  "#version":
+                    "version",
+                },
+
+                ExpressionAttributeValues:
+                  entitlementValues,
+              },
+            },
+
+            {
+              Update: {
+                TableName:
+                  checkoutAttemptTableName,
+
+                Key: {
+                  checkoutAttemptId: {
+                    S:
+                      attempt
+                        .checkoutAttemptId,
+                  },
+                },
+
+                UpdateExpression:
+                  "SET #status = :paidStatus, " +
+                  "stripeCheckoutSessionId = :sessionId, " +
+                  "paidAt = :paidAt, " +
+                  "updatedAt = :processedAt",
+
+                ConditionExpression:
+                  "#status = :createdStatus AND " +
+                  "userId = :userId AND " +
+                  "stripeCustomerId = :stripeCustomerId AND " +
+                  "planCode = :planCode AND " +
+                  "billingContractVersion = :billingContractVersion AND " +
+                  "stripePriceId = :stripePriceId AND " +
+                  "amountTotal = :amountTotal AND " +
+                  "currency = :currency AND " +
+                  "checkoutMode = :checkoutMode AND " +
+                  "accessDays = :accessDays AND " +
+                  "termsVersion = :termsVersion AND " +
+                  "privacyVersion = :privacyVersion AND " +
+                  "checkoutConsentVersion = :checkoutConsentVersion AND " +
+                  "immediateDeliveryConsent = :trueValue AND " +
+                  "withdrawalRightLossAcknowledged = :trueValue",
+
+                ExpressionAttributeNames: {
+                  "#status":
+                    "status",
+                },
+
+                ExpressionAttributeValues: {
+                  ":paidStatus": {
+                    S: "PAID",
+                  },
+
+                  ":createdStatus": {
+                    S: "CREATED",
+                  },
+
+                  ":sessionId": {
+                    S: session.id,
+                  },
+
+                  ":paidAt": {
+                    S: paidAtIso,
+                  },
+
+                  ":processedAt": {
+                    S: processedAt,
+                  },
+
+                  ":userId": {
+                    S: attempt.userId,
+                  },
+
+                  ":stripeCustomerId": {
+                    S:
+                      attempt
+                        .stripeCustomerId,
+                  },
+
+                  ":planCode": {
+                    S: attempt.planCode,
+                  },
+
+                  ":billingContractVersion": {
+                    S:
+                      attempt
+                        .billingContractVersion,
+                  },
+
+                  ":stripePriceId": {
+                    S:
+                      attempt
+                        .stripePriceId,
+                  },
+
+                  ":amountTotal": {
+                    N: String(
+                      attempt
+                        .amountTotal,
+                    ),
+                  },
+
+                  ":currency": {
+                    S: attempt.currency,
+                  },
+
+                  ":checkoutMode": {
+                    S:
+                      attempt
+                        .checkoutMode,
+                  },
+
+                  ":accessDays": {
+                    N: String(
+                      attempt
+                        .accessDays,
+                    ),
+                  },
+
+                  ":termsVersion": {
+                    S:
+                      attempt
+                        .termsVersion,
+                  },
+
+                  ":privacyVersion": {
+                    S:
+                      attempt
+                        .privacyVersion,
+                  },
+
+                  ":checkoutConsentVersion": {
+                    S:
+                      attempt
+                        .checkoutConsentVersion,
+                  },
+
+                  ":trueValue": {
+                    BOOL: true,
+                  },
+                },
+              },
+            },
+          ],
+        }),
+      );
+
+      return "granted";
+    } catch (error) {
+      if (
+        !isTransactionCanceled(
+          error,
+        )
+      ) {
+        throw error;
+      }
+
+      const [
+        eventAlreadyExists,
+        purchaseAlreadyExists,
+        latestAttempt,
+      ] =
+        await Promise.all([
+          itemExists(
+            stripeEventTableName,
+            "eventId",
+            stripeEvent.id,
+          ),
+
+          itemExists(
+            billingPurchaseTableName,
+            "stripeCheckoutSessionId",
+            session.id,
+          ),
+
+          getCheckoutAttempt(
+            attempt
+              .checkoutAttemptId,
+          ),
+        ]);
+
+      if (
+        purchaseAlreadyExists
+      ) {
+        return "duplicate";
+      }
+
+      if (
+        eventAlreadyExists ||
+        latestAttempt.status ===
+          "PAID"
+      ) {
+        throw new Error(
+          "Inconsistent billing transaction state.",
+        );
+      }
+
+      /*
+       * Neither billing idempotency key exists and the attempt is still
+       * CREATED. The remaining expected conditional conflict is the
+       * Entitlement optimistic lock, so re-read and retry from scratch.
+       */
+    }
+  }
+
+  throw new Error(
+    "Entitlement update concurrency limit exceeded.",
+  );
+}
+
+export const handler:
+  APIGatewayProxyHandlerV2 =
+  async (event) => {
+    const signature =
+      getStripeSignature(
+        event,
+      );
+
+    if (!signature) {
+      return jsonResponse(
+        400,
+        {
+          error:
+            "Invalid webhook request.",
+        },
+      );
+    }
+
+    let rawBody:
+      string | Buffer;
+
+    try {
+      rawBody =
+        getRawBody(event);
+    } catch {
+      return jsonResponse(
+        400,
+        {
+          error:
+            "Invalid webhook request.",
+        },
+      );
+    }
+
+    let stripeEvent:
+      Stripe.Event;
+
+    try {
+      stripeEvent =
+        Stripe.webhooks
+          .constructEvent(
+            rawBody,
+            signature,
+            env
+              .STRIPE_WEBHOOK_SECRET,
+          );
+    } catch {
+      console.warn(
+        "Rejected Stripe webhook with invalid signature.",
+      );
+
+      return jsonResponse(
+        400,
+        {
+          error:
+            "Invalid webhook signature.",
+        },
+      );
+    }
+
+    if (
+      !ALLOWED_EVENT_TYPES.has(stripeEvent.type) &&
+      !REFUND_EVENT_TYPES.has(stripeEvent.type)
+    ) {
+      return jsonResponse(
+        200,
+        {
+          received: true,
+          ignored: true,
+        },
+      );
+    }
+
+    try {
+      if (REFUND_EVENT_TYPES.has(stripeEvent.type)) {
+        const expectedLive = getExpectedLivemode();
+        if (stripeEvent.livemode !== expectedLive) {
+          throw new WebhookContractError("refund_event_wrong_livemode");
+        }
+        const observation = await applyRefundObservation(
+          stripeEvent.data.object as Stripe.Refund,
+          stripeEvent.id,
+          stripeEvent.created,
+        );
+        console.info("Refund webhook reconciled", {
+          eventId: stripeEvent.id,
+          outcome: observation.outcome,
+        });
+        return jsonResponse(200, { received: true });
+      }
+
+      const checkout =
+        await verifyCheckoutContract(
+          stripeEvent,
+        );
+
+      if (
+        stripeEvent.type ===
+          "checkout.session.completed" &&
+        checkout.session
+          .payment_status ===
+          "unpaid"
+      ) {
+        await recordEventOnly(
+          stripeEvent,
+          checkout.attempt
+            .checkoutAttemptId,
+          checkout.session.id,
+          "PAYMENT_PENDING",
+        );
+
+        return jsonResponse(
+          200,
+          {
+            received: true,
+            pending: true,
+          },
+        );
+      }
+
+      if (
+        stripeEvent.type ===
+          "checkout.session.async_payment_failed"
+      ) {
+        await recordEventOnly(
+          stripeEvent,
+          checkout.attempt
+            .checkoutAttemptId,
+          checkout.session.id,
+          "PAYMENT_FAILED",
+        );
+
+        return jsonResponse(
+          200,
+          {
+            received: true,
+          },
+        );
+      }
+
+      if (
+        checkout.session
+          .payment_status !==
+        "paid"
+      ) {
+        throw new WebhookContractError(
+          "payment_not_paid",
+        );
+      }
+
+      const result =
+        await grantOneTimeAccess(
+          stripeEvent,
+          checkout,
+        );
+
+      console.info(
+        "Processed Stripe payment webhook.",
+        {
+          eventId:
+            stripeEvent.id,
+          eventType:
+            stripeEvent.type,
+          result,
+        },
+      );
+
+      return jsonResponse(
+        200,
+        {
+          received: true,
+          duplicate:
+            result ===
+            "duplicate",
+        },
+      );
+    } catch (error) {
+      if (
+        error instanceof
+        WebhookContractError
+      ) {
+        console.error(
+          "Stripe webhook violated billing contract.",
+          {
+            eventId:
+              stripeEvent.id,
+            eventType:
+              stripeEvent.type,
+            reason:
+              error.code,
+          },
+        );
+      } else {
+        console.error(
+          "Failed to process Stripe webhook.",
+          {
+            eventId:
+              stripeEvent.id,
+            eventType:
+              stripeEvent.type,
+            errorName:
+              error instanceof Error
+                ? error.name
+                : "UnknownError",
+          },
+        );
+      }
+
+      /*
+       * Stripe will retry 5xx responses. The API Gateway 5xx alarm in
+       * backend.ts ensures handled failures are still operationally visible.
+       */
+      return jsonResponse(
+        500,
+        {
+          error:
+            "Webhook processing failed.",
+        },
+      );
+    }
+  };
+===== BILLING REFUND SCHEMA =====
+883-/*
+884- * Immutable claim boundary for a full refund of one Checkout Session.
+885- *
+886- * C1 has a persistent record before any external Stripe call. It is
+887- * intentionally NOT exposed as an Amplify Data model.
+888- */
+889-const billingRefundTable = new Table(
+890-  billingStack,
+891:  "BillingRefundTable",
+892-  {
+893-    partitionKey: {
+894-      name: "stripeCheckoutSessionId",
+895-      type: AttributeType.STRING,
+896-    },
+897-    billingMode: BillingMode.PAY_PER_REQUEST,
+898-    pointInTimeRecoverySpecification: {
+899-      pointInTimeRecoveryEnabled: true,
+900-    },
+901-    removalPolicy: RemovalPolicy.RETAIN,
+902-  },
+903-);
+904-
+905-/*
+906- * Checkout completion status.
+907- *
+908- * Read-only access to a purchase by Checkout Session ID.
+909- */
+910-billingPurchaseTable.grant(
+911-  backend
+912-    .checkoutStatus
+913-    .resources
+914-    .lambda,
+915-  "dynamodb:GetItem",
+916-);
+917-
+918-backend.checkoutStatus.addEnvironment(
+919-  "BILLING_PURCHASE_TABLE_NAME",
+920-  billingPurchaseTable.tableName,
+921-);
+922-
+923-billingPurchaseTable.addGlobalSecondaryIndex({
+924-  indexName:
+925-    "userId-index",
+926-
+927-  partitionKey: {
+928-    name:
+929-      "userId",
+930-
+931-    type:
+932-      AttributeType.STRING,
+933-  },
+934-
+935-  sortKey: {
+936-    name:
+937-      "paidAt",
+938-
+939-    type:
+940-      AttributeType.STRING,
+941-  },
+942-
+943-  projectionType:
+944-    ProjectionType.KEYS_ONLY,
+945-});
+946-
+947-/*
+948- * Stripe webhook idempotency table.
+949- */
+950-const stripeEventTable =
+951-  new Table(
+952-    billingStack,
+953-    "StripeEventTable",
+954-    {
+955-      partitionKey: {
+956-        name:
+957-          "eventId",
+958-
+959-        type:
+960-          AttributeType.STRING,
+961-      },
+962-
+963-      billingMode:
+964-        BillingMode.PAY_PER_REQUEST,
+965-
+966-      pointInTimeRecoverySpecification: {
+967-        pointInTimeRecoveryEnabled:
+968-          true,
+969-      },
+970-    },
+971-  );
+972-
+973-/*
+974- * Stripe Checkout session creator.
+975- *
+976- * Least privilege:

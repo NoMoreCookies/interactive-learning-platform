@@ -214,3 +214,18 @@ export async function adminReconcileRefund(stripeCheckoutSessionId: string): Pro
   );
   return parseRefundOperationResult(requireResult(data, errors, "adminReconcileRefund"));
 }
+
+export async function adminImportExternalRefund(stripeCheckoutSessionId: string, stripeRefundId: string): Promise<RefundOperationResult> {
+  const { data, errors } = await amplifyClient.mutations.adminImportExternalRefund({
+    stripeCheckoutSessionId, stripeRefundId, confirmationSessionId: stripeCheckoutSessionId, confirmationRefundId: stripeRefundId,
+  }, { authMode: "userPool" });
+  return parseRefundOperationResult(requireResult(data, errors, "adminImportExternalRefund"));
+}
+
+export async function adminListRefundReviews(nextToken?: string) {
+  const { data, errors } = await amplifyClient.queries.adminListRefundReviews({ nextToken }, { authMode: "userPool" });
+  return parsePage(requireResult(data, errors, "adminListRefundReviews"), (value) => {
+    const item = object(value);
+    return { eventId: string(item.eventId), stripeRefundId: string(item.stripeRefundId), outcome: string(item.outcome) };
+  });
+}

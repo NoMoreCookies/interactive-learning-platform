@@ -589,36 +589,45 @@ async function getOrCreateStripeCustomer(
   }
 }
 
+function getExpectedLivemode(): boolean {
+  const value = process.env.STRIPE_EXPECTED_LIVEMODE;
+
+  if (value !== "true" && value !== "false") {
+    throw new Error(
+      "Invalid Stripe environment configuration.",
+    );
+  }
+
+  return value === "true";
+}
+
 async function assertStripePriceMatchesPlan(
   planCode: BillingPlanCode,
   stripePriceId: string,
 ): Promise<void> {
-  const expectedPlan =
-    BILLING_PLANS[
-      planCode
-    ];
+  const expectedPlan = BILLING_PLANS[planCode];
+  const expectedLivemode = getExpectedLivemode();
 
-  const stripePrice =
-    await stripe.prices.retrieve(
-      stripePriceId,
-    );
+  const stripePrice = await stripe.prices.retrieve(
+    stripePriceId,
+  );
 
   const isValid =
-    stripePrice.active ===
-      true &&
-    stripePrice.type ===
-      "one_time" &&
-    stripePrice.currency ===
-      expectedPlan.currency &&
-    stripePrice.unit_amount ===
-      expectedPlan.unitAmount;
+    stripePrice.livemode === expectedLivemode &&
+    stripePrice.active === true &&
+    stripePrice.type === "one_time" &&
+    stripePrice.currency === expectedPlan.currency &&
+    stripePrice.unit_amount === expectedPlan.unitAmount;
 
   if (!isValid) {
     throw new Error(
-      "Stripe Price does not match the trusted billing plan.",
+      "Stripe Price does not match the trusted billing plan or environment.",
     );
   }
 }
+
+
+
 
 /*
  * Creates the authoritative server-side snapshot of the purchase

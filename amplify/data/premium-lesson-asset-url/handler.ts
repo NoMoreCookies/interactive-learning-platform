@@ -140,18 +140,11 @@ function isExpectedAssetPath(
     path.trim();
 
   if (
-    !normalizedPath.startsWith(
-      "courses/",
-    ) ||
-    normalizedPath.startsWith(
-      "/",
-    ) ||
-    normalizedPath.includes(
-      "..",
-    ) ||
-    normalizedPath.includes(
-      "\\",
-    )
+    normalizedPath !== path ||
+    !normalizedPath.startsWith("courses/") ||
+    normalizedPath.startsWith("/") ||
+    normalizedPath.includes("..") ||
+    normalizedPath.includes("\\")
   ) {
     return false;
   }
@@ -164,18 +157,18 @@ function isExpectedAssetPath(
    *
    * courses/{courseSlug}/{lessonSlug}/{fileName}
    */
-  if (
-    segments.length !== 4 ||
-    segments.some(
-      (segment) =>
-        !segment.trim(),
-    )
-  ) {
-    return false;
-  }
+    if (
+      segments.length !== 5 ||
+      segments[0] !== "courses" ||
+      segments[2] !== "lessons" ||
+      segments.some(
+        (segment) => !segment.trim(),
+      )
+    ) {
+      return false;
+    }
 
-  const fileName =
-    segments[3].toLowerCase();
+    const fileName = segments[4].toLowerCase();
 
   if (
     assetType === "VIDEO"
@@ -463,6 +456,22 @@ export const handler:
         !coursePublished
       ) {
         return null;
+      }
+
+      /*
+      * Defense in depth:
+      * Ensure the stored S3 key belongs to the exact
+      * course and lesson resolved from DynamoDB.
+      */
+      const assetSegments = assetPath.split("/");
+
+      if (
+        assetSegments[1] !== courseId ||
+        assetSegments[3] !== lessonId
+      ) {
+        throw new Error(
+          "Stored asset path does not match lesson hierarchy",
+        );
       }
 
       /*

@@ -1,3 +1,5 @@
+import { adminImportExternalRefund } from "./admin-import-external-refund/resource";
+import { adminListRefundReviews } from "./admin-list-refund-reviews/resource";
 import {
   type ClientSchema,
   a,
@@ -540,6 +542,19 @@ createCheckoutSession: a
       .returns(a.ref("AdminInitiateRefundResult"))
       .authorization((allow) => [allow.group("ADMIN")])
       .handler(a.handler.function(adminInitiateRefund)),
+
+    ExternalRefundReview: a.customType({ eventId: a.string().required(), stripeRefundId: a.string().required(), outcome: a.string().required() }),
+    ExternalRefundReviewPage: a.customType({ items: a.ref("ExternalRefundReview").array().required(), nextToken: a.string() }),
+    adminListRefundReviews: a.query()
+      .arguments({ nextToken: a.string() })
+      .returns(a.ref("ExternalRefundReviewPage"))
+      .authorization((allow) => [allow.group("ADMIN")])
+      .handler(a.handler.function(adminListRefundReviews)),
+    adminImportExternalRefund: a.mutation()
+      .arguments({ stripeCheckoutSessionId: a.string().required(), stripeRefundId: a.string().required(), confirmationSessionId: a.string().required(), confirmationRefundId: a.string().required() })
+      .returns(a.ref("AdminInitiateRefundResult"))
+      .authorization((allow) => [allow.group("ADMIN")])
+      .handler(a.handler.function(adminImportExternalRefund)),
 
     /* ADMIN-only Stripe GET reconciliation; no new refund is issued. */
     adminReconcileRefund: a

@@ -12,7 +12,7 @@ import type {
 } from "aws-lambda";
 
 import Stripe from "stripe";
-import { applyRefundObservation } from "../../shared/refund-reconciliation";
+import { applyRefundObservation, RefundCorrelationIncident, MissingRefundCorrelation, recordExternalRefundReview } from "../../shared/refund-reconciliation";
 
 import {
   env,
@@ -1704,11 +1704,22 @@ export const handler:
         if (stripeEvent.livemode !== expectedLive) {
           throw new WebhookContractError("refund_event_wrong_livemode");
         }
-        const observation = await applyRefundObservation(
-          stripeEvent.data.object as Stripe.Refund,
-          stripeEvent.id,
-          stripeEvent.created,
-        );
+        let observation;
+        try {
+          observation = await applyRefundObservation(
+            stripeEvent.data.object as Stripe.Refund, stripeEvent.id, stripeEvent.created,
+          );
+        } catch (error) {
+          if (error instanceof RefundCorrelationIncident) {
+            await recordExternalRefundReview(stripeEvent.data.object as Stripe.Refund, `incident_${stripeEvent.id}`, error.reason);
+            console.error("Refund correlation incident requires ADMIN investigation", { eventId: stripeEvent.id, reason: error.reason });
+            throw error; // Preserve HTTP 5xx, Stripe retries and operational alerting.
+          }
+          if (!(error instanceof MissingRefundCorrelation)) throw error;
+          await recordExternalRefundReview(stripeEvent.data.object as Stripe.Refund, stripeEvent.id, error.reason);
+          console.warn("External refund requires ADMIN review", { eventId: stripeEvent.id, reason: error.reason });
+          return jsonResponse(200, { received: true, reviewRequired: true });
+        }
         console.info("Refund webhook reconciled", {
           eventId: stripeEvent.id,
           outcome: observation.outcome,

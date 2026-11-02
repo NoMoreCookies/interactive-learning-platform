@@ -1,3 +1,5 @@
+import { adminImportExternalRefund } from "./data/admin-import-external-refund/resource";
+import { adminListRefundReviews } from "./data/admin-list-refund-reviews/resource";
 import {
   defineBackend,
 } from "@aws-amplify/backend";
@@ -138,6 +140,8 @@ const backend = defineBackend({
   checkoutStatus,
   adminInitiateRefund,
   adminReconcileRefund,
+  adminImportExternalRefund,
+  adminListRefundReviews,
   createComplaint,
   getMyComplaints,
   getMyPurchases,
@@ -970,6 +974,15 @@ const stripeEventTable =
     },
   );
 
+// Sparse operational review index; raw webhook payloads are never stored.
+stripeEventTable.addGlobalSecondaryIndex({
+  indexName: "reviewState-eventId-index",
+  partitionKey: { name: "reviewState", type: AttributeType.STRING },
+  sortKey: { name: "eventId", type: AttributeType.STRING },
+  projectionType: ProjectionType.INCLUDE,
+  nonKeyAttributes: ["stripeRefundId", "outcome"],
+});
+
 /*
  * Stripe Checkout session creator.
  *
@@ -1187,14 +1200,9 @@ checkoutAttemptTable.grant(
   "dynamodb:UpdateItem",
 );
 
-stripeEventTable.grant(
-  backend
-    .stripeWebhook
-    .resources
-    .lambda,
-  "dynamodb:GetItem",
-  "dynamodb:PutItem",
-);
+backend.stripeWebhook.resources.lambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:GetItem", "dynamodb:PutItem"], resources: [stripeEventTable.tableArn],
+}));
 
 billingPurchaseTable.grant(
   backend
@@ -1510,7 +1518,7 @@ const reconcileLambda = backend.adminReconcileRefund.resources.lambda;
 billingRefundTable.grant(reconcileLambda, "dynamodb:GetItem", "dynamodb:UpdateItem");
 billingPurchaseTable.grant(reconcileLambda, "dynamodb:GetItem");
 entitlementTable.grant(reconcileLambda, "dynamodb:GetItem", "dynamodb:UpdateItem");
-stripeEventTable.grant(reconcileLambda, "dynamodb:PutItem");
+reconcileLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:PutItem"], resources: [stripeEventTable.tableArn] }));
 reconcileLambda.addToRolePolicy(new PolicyStatement({
   actions: ["dynamodb:Query"],
   resources: [`${billingPurchaseTable.tableArn}/index/userId-index`],
@@ -1519,6 +1527,23 @@ backend.adminReconcileRefund.addEnvironment("BILLING_REFUND_TABLE_NAME", billing
 backend.adminReconcileRefund.addEnvironment("BILLING_PURCHASE_TABLE_NAME", billingPurchaseTable.tableName);
 backend.adminReconcileRefund.addEnvironment("ENTITLEMENT_TABLE_NAME", entitlementTable.tableName);
 backend.adminReconcileRefund.addEnvironment("STRIPE_EVENT_TABLE_NAME", stripeEventTable.tableName);
+
+const importLambda = backend.adminImportExternalRefund.resources.lambda;
+importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"], resources: [billingRefundTable.tableArn] }));
+importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem", "dynamodb:ConditionCheckItem"], resources: [billingPurchaseTable.tableArn] }));
+importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem", "dynamodb:UpdateItem"], resources: [entitlementTable.tableArn] }));
+importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem", "dynamodb:PutItem"], resources: [stripeEventTable.tableArn] }));
+importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:Query"], resources: [`${billingPurchaseTable.tableArn}/index/userId-index`] }));
+backend.adminImportExternalRefund.addEnvironment("BILLING_REFUND_TABLE_NAME", billingRefundTable.tableName);
+backend.adminImportExternalRefund.addEnvironment("BILLING_PURCHASE_TABLE_NAME", billingPurchaseTable.tableName);
+backend.adminImportExternalRefund.addEnvironment("ENTITLEMENT_TABLE_NAME", entitlementTable.tableName);
+backend.adminImportExternalRefund.addEnvironment("STRIPE_EVENT_TABLE_NAME", stripeEventTable.tableName);
+const reviewLambda = backend.adminListRefundReviews.resources.lambda;
+reviewLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem"], resources: [stripeEventTable.tableArn] }));
+reviewLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem"], resources: [billingRefundTable.tableArn] }));
+reviewLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:Query"], resources: [`${stripeEventTable.tableArn}/index/reviewState-eventId-index`] }));
+backend.adminListRefundReviews.addEnvironment("STRIPE_EVENT_TABLE_NAME", stripeEventTable.tableName);
+backend.adminListRefundReviews.addEnvironment("BILLING_REFUND_TABLE_NAME", billingRefundTable.tableName);
 
 
 /*

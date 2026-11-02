@@ -24,7 +24,11 @@ const REFUND_PATTERN = /^(?:re|pyr)_[A-Za-z0-9]{8,220}$/;
 const PAYMENT_INTENT_PATTERN = /^pi_[A-Za-z0-9]{8,220}$/;
 
 type Item = Record<string, AttributeValue>;
+type ReconciliationOptions = { client?: DynamoDBClient; signal?: AbortSignal; assertTransactionBudget?: () => void };
 type Names = {
+  client: DynamoDBClient;
+  signal?: AbortSignal;
+  assertTransactionBudget?: () => void;
   refunds: string;
   purchases: string;
   entitlements: string;
@@ -38,7 +42,9 @@ type RefundRecord = {
   amount: number;
   currency: string;
   status: string;
-  complaintId: string;
+  complaintId: string | null;
+  origin: string;
+  customerId: string | null;
   lastObservation: number | null;
 };
 type Entitlement = {
@@ -52,8 +58,11 @@ function requiredEnvironment(key: string): string {
   if (!result) throw new Error(`Missing refund reconciliation configuration: ${key}`);
   return result;
 }
-function tableNames(): Names {
+function tableNames(options: ReconciliationOptions = {}): Names {
   return {
+    client: options.client ?? db,
+    signal: options.signal,
+    assertTransactionBudget: options.assertTransactionBudget,
     refunds: requiredEnvironment("BILLING_REFUND_TABLE_NAME"),
     purchases: requiredEnvironment("BILLING_PURCHASE_TABLE_NAME"),
     entitlements: requiredEnvironment("ENTITLEMENT_TABLE_NAME"),
@@ -85,29 +94,32 @@ function stripeStatus(refund: Stripe.Refund): "SUCCEEDED" | "PENDING" | "FAILED"
 }
 async function recordEventOnly(names: Names, eventId: string, refund: Stripe.Refund, outcome: string) {
   try {
-    await db.send(new PutItemCommand({
+    await names.client.send(new PutItemCommand({
       TableName: names.events,
       Item: {
-        eventId: { S: eventId }, eventType: { S: "REFUND_OBSERVATION" },
+        eventId: { S: eventId }, eventType: { S: outcome.startsWith("MANUAL_REVIEW_") ? "EXTERNAL_REFUND_REVIEW" : "REFUND_OBSERVATION" },
         stripeRefundId: { S: refund.id }, outcome: { S: outcome },
         processedAt: { S: new Date().toISOString() },
+        ...(outcome.startsWith("MANUAL_REVIEW_") ? { reviewState: { S: "MANUAL_REVIEW" } } : {}),
       },
       ConditionExpression: "attribute_not_exists(eventId)",
-    }));
+    }), { abortSignal: names.signal });
   } catch (error) {
     if ((error as { name?: string }).name !== "ConditionalCheckFailedException") throw error;
   }
 }
 async function getRefundRecord(names: Names, sessionId: string): Promise<RefundRecord> {
-  const { Item: record } = await db.send(new GetItemCommand({
+  const { Item: record } = await names.client.send(new GetItemCommand({
     TableName: names.refunds,
     Key: { stripeCheckoutSessionId: { S: sessionId } }, ConsistentRead: true,
-  }));
-  if (!record) throw new Error("Refund has no durable reservation; investigate Stripe Dashboard before reconciliation.");
+  }), { abortSignal: names.signal });
+  if (!record) throw new MissingRefundCorrelation("MISSING_RESERVATION");
   const refundId = record.stripeRefundId?.S ?? null;
   return {
     sessionId, refundId,
-    complaintId: requiredString(record, "complaintId"),
+    complaintId: record.origin?.S === "EXTERNAL_IMPORT" ? null : requiredString(record, "complaintId"),
+    origin: record.origin?.S ?? "INTERNAL",
+    customerId: record.origin?.S === "EXTERNAL_IMPORT" ? requiredString(record, "stripeCustomerId") : null,
     paymentIntentId: requiredString(record, "stripePaymentIntentId"),
     userId: requiredString(record, "userId"),
     amount: positiveNumber(record, "amount"),
@@ -116,19 +128,28 @@ async function getRefundRecord(names: Names, sessionId: string): Promise<RefundR
     lastObservation: record.lastObservation?.N ? Number(record.lastObservation.N) : null,
   };
 }
+function assertSameAssociation(expected: RefundRecord, latest: RefundRecord, observedRefundId: string) {
+  if (latest.origin !== expected.origin || latest.complaintId !== expected.complaintId ||
+      latest.paymentIntentId !== expected.paymentIntentId || latest.userId !== expected.userId ||
+      latest.amount !== expected.amount || latest.currency !== expected.currency || latest.customerId !== expected.customerId ||
+      (latest.refundId !== null && latest.refundId !== observedRefundId) ||
+      (expected.refundId !== null && latest.refundId !== expected.refundId)) {
+    throw new RefundCorrelationIncident("ASSOCIATION_CHANGED");
+  }
+}
 async function getPurchase(names: Names, sessionId: string): Promise<Item> {
-  const result = await db.send(new GetItemCommand({
+  const result = await names.client.send(new GetItemCommand({
     TableName: names.purchases,
     Key: { stripeCheckoutSessionId: { S: sessionId } }, ConsistentRead: true,
-  }));
+  }), { abortSignal: names.signal });
   if (!result.Item) throw new Error("Purchased session missing from billing ledger.");
   return result.Item;
 }
 async function getEntitlement(names: Names, userId: string): Promise<Entitlement> {
-  const { Item: item } = await db.send(new GetItemCommand({
+  const { Item: item } = await names.client.send(new GetItemCommand({
     TableName: names.entitlements,
     Key: { userId: { S: userId } }, ConsistentRead: true,
-  }));
+  }), { abortSignal: names.signal });
   if (!item) throw new Error("Purchase has no entitlement; requires investigation.");
   const version = positiveNumber(item, "version");
   if (requiredString(item, "productCode") !== "PREMIUM") throw new Error("Unexpected entitlement product.");
@@ -148,14 +169,14 @@ async function readAllPurchases(names: Names, userId: string, requiredPurchaseId
   const keys: string[] = [];
   let cursor: Record<string, AttributeValue> | undefined;
   do {
-    const result = await db.send(new QueryCommand({
+    const result = await names.client.send(new QueryCommand({
       TableName: names.purchases, IndexName: "userId-index",
       KeyConditionExpression: "userId = :userId",
       ExpressionAttributeValues: { ":userId": { S: userId } },
       ProjectionExpression: "stripeCheckoutSessionId",
       ExclusiveStartKey: cursor,
       Limit: MAX_PURCHASES_PER_USER + 1,
-    }));
+    }), { abortSignal: names.signal });
     for (const item of result.Items ?? []) {
       keys.push(requiredString(item, "stripeCheckoutSessionId"));
     }
@@ -165,14 +186,33 @@ async function readAllPurchases(names: Names, userId: string, requiredPurchaseId
   if (requiredPurchaseId && !keys.includes(requiredPurchaseId)) {
     throw new Error("Purchase index is lagging Entitlement; retry reconciliation.");
   }
-  const purchases: Array<{item: Item; sessionId: string}> = [];
-  // Sequential strongly consistent lookups are bounded at MAX_PURCHASES_PER_USER.
-  for (const sessionId of keys) {
+  return boundedMap(keys, async (sessionId) => {
     const item = await getPurchase(names, sessionId);
     if (requiredString(item, "userId") !== userId) throw new Error("Owner mismatch in purchase ledger.");
-    purchases.push({ item, sessionId });
+    return { item, sessionId };
+  });
+}
+
+// Bound concurrent reads as well as total records. No background writes.
+async function boundedMap<T, R>(items: T[], read: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = [];
+  for (let offset = 0; offset < items.length; offset += 8) {
+    results.push(...await Promise.all(items.slice(offset, offset + 8).map(read)));
   }
-  return purchases;
+  return results;
+}
+
+export class RefundCorrelationIncident extends Error {
+  constructor(public readonly reason: string) { super(reason); }
+}
+
+export class MissingRefundCorrelation extends Error {
+  constructor(public readonly reason: "MISSING_METADATA" | "MISSING_RESERVATION") { super(reason); }
+}
+
+/** Only called after webhook signature and environment verification. No metadata or PII stored. */
+export async function recordExternalRefundReview(refund: Stripe.Refund, eventId: string, reason: string, options: ReconciliationOptions = {}) {
+  await recordEventOnly(tableNames(options), eventId, refund, "MANUAL_REVIEW_" + reason);
 }
 
 export type RefundObservation = { outcome: "SUCCEEDED" | "PENDING" | "FAILED" | "CANCELED" | "REQUIRES_ACTION" | "DUPLICATE"; refundId: string; };
@@ -183,39 +223,44 @@ export type RefundObservation = { outcome: "SUCCEEDED" | "PENDING" | "FAILED" | 
  * reconciliation Lambda the refund is freshly retrieved from Stripe API.
  * No new Refund POST is issued here.
  */
-export async function applyRefundObservation(refund: Stripe.Refund, eventId: string, observationSeconds: number): Promise<RefundObservation> {
-  if (!/^evt_[A-Za-z0-9]{8,220}$/.test(eventId) && !/^manual_[A-Za-z0-9_-]{8,220}$/.test(eventId)) {
+export async function applyRefundObservation(refund: Stripe.Refund, eventId: string, observationSeconds: number, externalSessionId?: string, options: ReconciliationOptions = {}): Promise<RefundObservation> {
+  if (!/^evt_[A-Za-z0-9]{8,220}$/.test(eventId) && !/^manual_[A-Za-z0-9_-]{8,280}$/.test(eventId)) {
     throw new Error("Invalid observation identifier.");
   }
   if (!REFUND_PATTERN.test(refund.id)) throw new Error("Invalid Stripe refund ID.");
   if (!Number.isSafeInteger(observationSeconds) || observationSeconds <= 0) {
     throw new Error("Invalid Stripe observation timestamp.");
   }
-  const sessionId = refund.metadata?.stripeCheckoutSessionId;
+  const sessionId = externalSessionId ?? refund.metadata?.stripeCheckoutSessionId;
   const complaintId = refund.metadata?.complaintId;
-  if (!sessionId || !SESSION_PATTERN.test(sessionId) || !complaintId) {
-    throw new Error("Refund missing trusted correlation metadata; needs manual investigation.");
+  if (!sessionId || !SESSION_PATTERN.test(sessionId) || (!externalSessionId && !complaintId)) {
+    throw new MissingRefundCorrelation("MISSING_METADATA");
   }
-  const names = tableNames();
+  const names = tableNames(options);
   const record = await getRefundRecord(names, sessionId);
+  // Imported refunds always require fresh API verification through the ADMIN operation.
+  if (!externalSessionId && record.origin === "EXTERNAL_IMPORT") throw new RefundCorrelationIncident("RESERVATION_ORIGIN_CONFLICT");
   if (
-    record.complaintId !== complaintId ||
+    (externalSessionId
+      ? record.origin !== "EXTERNAL_IMPORT" || record.refundId !== refund.id || refund.status !== "succeeded"
+      : record.origin === "EXTERNAL_IMPORT" || record.complaintId !== complaintId) ||
     !PAYMENT_INTENT_PATTERN.test(record.paymentIntentId) ||
     record.paymentIntentId !== normalizedPi(refund) ||
     record.currency !== refund.currency ||
     record.amount !== refund.amount ||
     (record.refundId !== null && record.refundId !== refund.id)
   ) {
-    throw new Error("Signed Stripe refund does not match our reserved purchase.");
+    throw new RefundCorrelationIncident("RESERVATION_MISMATCH");
   }
   const purchase = await getPurchase(names, sessionId);
   if (
     requiredString(purchase, "stripePaymentIntentId") !== record.paymentIntentId ||
     requiredString(purchase, "userId") !== record.userId ||
     requiredString(purchase, "currency") !== record.currency ||
-    positiveNumber(purchase, "amountTotal") !== record.amount
+    positiveNumber(purchase, "amountTotal") !== record.amount ||
+    (externalSessionId && requiredString(purchase, "stripeCustomerId") !== record.customerId)
   ) {
-    throw new Error("Reserved refund does not match immutable paid purchase.");
+    throw new RefundCorrelationIncident("PURCHASE_MISMATCH");
   }
   const currentStripeStatus = stripeStatus(refund);
   if (record.lastObservation !== null && record.lastObservation > observationSeconds) {
@@ -227,13 +272,13 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
   }
   if (record.status === "SUCCEEDED") {
     if (currentStripeStatus !== "SUCCEEDED") {
-      throw new Error("Stripe observation conflicts with an already settled refund.");
+      throw new RefundCorrelationIncident("SETTLED_STATE_CONFLICT");
     }
     await recordEventOnly(names, eventId, refund, "ALREADY_RECONCILED");
     return { outcome: "DUPLICATE", refundId: refund.id };
   }
   if (["FAILED", "CANCELED"].includes(record.status) && currentStripeStatus === "SUCCEEDED") {
-    throw new Error("Conflicting terminal refund states; manual review required.");
+    throw new RefundCorrelationIncident("TERMINAL_STATE_CONFLICT");
   }
   const now = new Date().toISOString();
   const statusValues = {
@@ -242,9 +287,14 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
     ":now": { S: now },
     ":pi": { S: record.paymentIntentId },
     ":amount": { N: String(record.amount) },
-    ":complaintId": { S: record.complaintId },
+    ":externalOrigin": { S: "EXTERNAL_IMPORT" },
+    ...(!externalSessionId ? { ":complaintId": { S: record.complaintId! } } : {}),
     ":observation": { N: String(observationSeconds) },
   };
+
+  const associationCondition = externalSessionId
+    ? "#origin = :externalOrigin AND stripeRefundId = :refundId"
+    : "complaintId = :complaintId AND (attribute_not_exists(#origin) OR #origin <> :externalOrigin)";
 
   if (currentStripeStatus !== "SUCCEEDED") {
     if (["FAILED", "CANCELED"].includes(record.status)) {
@@ -252,7 +302,8 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
       return { outcome: "DUPLICATE", refundId: refund.id };
     }
     try {
-      await db.send(new TransactWriteItemsCommand({ TransactItems: [
+      names.assertTransactionBudget?.();
+      await names.client.send(new TransactWriteItemsCommand({ TransactItems: [
         { Put: { TableName: names.events, Item: {
           eventId: { S: eventId }, eventType: { S: "REFUND_OBSERVATION" },
           stripeRefundId: { S: refund.id }, outcome: { S: currentStripeStatus },
@@ -260,15 +311,16 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
         }, ConditionExpression: "attribute_not_exists(eventId)" } },
         { Update: { TableName: names.refunds,
           Key: { stripeCheckoutSessionId: { S: sessionId } },
-          ConditionExpression: "#status <> :succeeded AND (attribute_not_exists(stripeRefundId) OR stripeRefundId = :refundId) AND (attribute_not_exists(lastObservation) OR lastObservation <= :observation) AND stripePaymentIntentId = :pi AND amount = :amount AND complaintId = :complaintId",
+          ConditionExpression: "#status <> :succeeded AND (attribute_not_exists(stripeRefundId) OR stripeRefundId = :refundId) AND (attribute_not_exists(lastObservation) OR lastObservation <= :observation) AND stripePaymentIntentId = :pi AND amount = :amount AND " + associationCondition,
           UpdateExpression: "SET #status = :newStatus, stripeRefundId = :refundId, stripeStatus = :newStatus, lastObservation = :observation, updatedAt = :now",
-          ExpressionAttributeNames: { "#status": "status" },
+          ExpressionAttributeNames: { "#status": "status", "#origin": "origin" },
           ExpressionAttributeValues: { ...statusValues, ":succeeded": { S: "SUCCEEDED" } },
         } },
-      ] }));
+      ] }), { abortSignal: names.signal });
     } catch (error) {
       if ((error as {name?: string}).name === "TransactionCanceledException") {
         const latest = await getRefundRecord(names, sessionId);
+        assertSameAssociation(record, latest, refund.id);
         if (latest.status === "SUCCEEDED" || latest.status === currentStripeStatus ||
             (latest.lastObservation !== null && latest.lastObservation > observationSeconds)) {
           return { outcome: "DUPLICATE", refundId: refund.id };
@@ -281,6 +333,7 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
 
   for (let attempt = 0; attempt < MAX_OPTIMISTIC_RETRIES; attempt++) {
     const latest = await getRefundRecord(names, sessionId);
+    assertSameAssociation(record, latest, refund.id);
     if (latest.lastObservation !== null && latest.lastObservation > observationSeconds) {
       if (latest.status !== "SUCCEEDED") {
         throw new Error("Out-of-order successful refund requires Stripe API reconciliation.");
@@ -292,7 +345,7 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
       await recordEventOnly(names, eventId, refund, "ALREADY_RECONCILED");
       return { outcome: "DUPLICATE", refundId: refund.id };
     }
-    if (["FAILED", "CANCELED"].includes(latest.status)) throw new Error("Cannot reconcile conflicting terminal refund.");
+    if (["FAILED", "CANCELED"].includes(latest.status)) throw new RefundCorrelationIncident("TERMINAL_STATE_CONFLICT");
 
     const entitlement = await getEntitlement(names, record.userId);
     if (entitlement.revokedReason && entitlement.revokedReason !== "REFUND_RECONCILIATION") {
@@ -300,23 +353,22 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
     }
     const allPurchases = await readAllPurchases(names, record.userId, entitlement.lastPurchaseId);
     if (!allPurchases.some(({sessionId: id}) => id === sessionId)) throw new Error("Refunded purchase missing from GSI; retry.");
-    const survivors: PaidPurchase[] = [];
-    for (const {item, sessionId: id} of allPurchases) {
-      if (id === sessionId) continue;
-      const other = await db.send(new GetItemCommand({
+    const candidates = await boundedMap(allPurchases.filter((purchase) => purchase.sessionId !== sessionId), async ({ item, sessionId: id }): Promise<PaidPurchase | null> => {
+      const other = await names.client.send(new GetItemCommand({
         TableName: names.refunds,
         Key: { stripeCheckoutSessionId: { S: id } }, ConsistentRead: true,
         ProjectionExpression: "#status",
         ExpressionAttributeNames: { "#status": "status" },
-      }));
-      if (other.Item?.status?.S === "SUCCEEDED") continue;
-      survivors.push({
+      }), { abortSignal: names.signal });
+      if (other.Item?.status?.S === "SUCCEEDED") return null;
+      return {
         stripeCheckoutSessionId: id,
         paidAt: requiredString(item, "paidAt"),
         grantedFrom: requiredString(item, "grantedFrom"),
         accessDays: positiveNumber(item, "accessDays"),
-      });
-    }
+      };
+    });
+    const survivors = candidates.filter((purchase): purchase is PaidPurchase => purchase !== null);
     const calculated = calculateSurvivingAccess(survivors);
     const noAccess = calculated.accessUntil === null;
     const updatePieces = ["accessUntil = :until", "updatedAt = :now", "#version = :next", "#source = :source"];
@@ -340,7 +392,8 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
     const updateExpression = `SET ${updatePieces.join(", ")}${removals.length ? ` REMOVE ${removals.join(", ")}` : ""}`;
 
     try {
-      await db.send(new TransactWriteItemsCommand({ TransactItems: [
+      names.assertTransactionBudget?.();
+      await names.client.send(new TransactWriteItemsCommand({ TransactItems: [
         { Put: { TableName: names.events, Item: {
           eventId: { S: eventId }, eventType: { S: "REFUND_OBSERVATION" },
           stripeRefundId: { S: refund.id }, outcome: { S: "REFUND_SUCCEEDED" },
@@ -348,9 +401,9 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
         }, ConditionExpression: "attribute_not_exists(eventId)" } },
         { Update: { TableName: names.refunds,
           Key: { stripeCheckoutSessionId: { S: sessionId } },
-          ConditionExpression: "#status <> :succeeded AND (attribute_not_exists(stripeRefundId) OR stripeRefundId = :refundId) AND (attribute_not_exists(lastObservation) OR lastObservation <= :observation) AND stripePaymentIntentId = :pi AND amount = :amount AND complaintId = :complaintId",
+          ConditionExpression: "#status <> :succeeded AND (attribute_not_exists(stripeRefundId) OR stripeRefundId = :refundId) AND (attribute_not_exists(lastObservation) OR lastObservation <= :observation) AND stripePaymentIntentId = :pi AND amount = :amount AND " + associationCondition,
           UpdateExpression: "SET #status = :newStatus, stripeRefundId = :refundId, stripeStatus = :newStatus, lastObservation = :observation, updatedAt = :now, succeededAt = :now",
-          ExpressionAttributeNames: { "#status": "status" },
+          ExpressionAttributeNames: { "#status": "status", "#origin": "origin" },
           ExpressionAttributeValues: { ...statusValues, ":succeeded": { S: "SUCCEEDED" } },
         } },
         { Update: { TableName: names.entitlements,
@@ -360,11 +413,12 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
           ExpressionAttributeNames: { "#version": "version", "#source": "source" },
           ExpressionAttributeValues: accessValues,
         } },
-      ] }));
+      ] }), { abortSignal: names.signal });
       return { outcome: "SUCCEEDED", refundId: refund.id };
     } catch (error) {
       if ((error as {name?: string}).name !== "TransactionCanceledException") throw error;
       const latestRecord = await getRefundRecord(names, sessionId);
+      assertSameAssociation(record, latestRecord, refund.id);
       if (latestRecord.status === "SUCCEEDED") {
         return { outcome: "DUPLICATE", refundId: refund.id };
       }

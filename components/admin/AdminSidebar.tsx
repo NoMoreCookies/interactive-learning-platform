@@ -14,6 +14,7 @@ type NavigationItem = {
 };
 
 const navigationItems: NavigationItem[] = [
+  { href: "/admin/refund-import", label: "Import zwrotów", description: "Przegląd i uzgodnienie Stripe", icon: <RefundIcon /> },
   {
     href: "/admin",
     label: "Dashboard",
@@ -200,6 +201,16 @@ function BookIcon() {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+    </svg>
+  );
+}
+
+function RefundIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-5 w-5">
+      <rect x="3" y="7" width="18" height="12" rx="2" />
+      <circle cx="12" cy="13" r="3" />
+      <path d="M8 3H4m0 0v4m0-4 4 4" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

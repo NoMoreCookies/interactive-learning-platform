@@ -5,6 +5,17 @@ import {
 
 const appBaseUrl =
   process.env.APP_BASE_URL?.trim();
+const expectedLivemode =
+  process.env.STRIPE_EXPECTED_LIVEMODE?.trim();
+
+if (
+  expectedLivemode !== "true" &&
+  expectedLivemode !== "false"
+) {
+  throw new Error(
+    "STRIPE_EXPECTED_LIVEMODE must be explicitly set to true or false.",
+  );
+}
 
 if (!appBaseUrl) {
   throw new Error(
@@ -17,6 +28,7 @@ export const createCheckoutSession =
     name: "create-checkout-session",
     entry: "./handler.ts",
     resourceGroupName: "data",
+    timeoutSeconds: 15,
 
     environment: {
       STRIPE_SECRET_KEY:
@@ -26,6 +38,8 @@ export const createCheckoutSession =
         secret(
           "STRIPE_PRICE_ONE_MONTH",
         ),
+
+      STRIPE_EXPECTED_LIVEMODE: expectedLivemode,
 
       APP_BASE_URL:
         appBaseUrl,

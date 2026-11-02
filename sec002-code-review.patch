@@ -1,0 +1,804 @@
+diff --git a/amplify/backend.ts b/amplify/backend.ts
+index 252ae4d..38d972e 100644
+--- a/amplify/backend.ts
++++ b/amplify/backend.ts
+@@ -1,3 +1,5 @@
++import { adminImportExternalRefund } from "./data/admin-import-external-refund/resource";
++import { adminListRefundReviews } from "./data/admin-list-refund-reviews/resource";
+ import {
+   defineBackend,
+ } from "@aws-amplify/backend";
+@@ -138,6 +140,8 @@ const backend = defineBackend({
+   checkoutStatus,
+   adminInitiateRefund,
+   adminReconcileRefund,
++  adminImportExternalRefund,
++  adminListRefundReviews,
+   createComplaint,
+   getMyComplaints,
+   getMyPurchases,
+@@ -970,6 +974,15 @@ const stripeEventTable =
+     },
+   );
+ 
++// Sparse operational review index; raw webhook payloads are never stored.
++stripeEventTable.addGlobalSecondaryIndex({
++  indexName: "reviewState-eventId-index",
++  partitionKey: { name: "reviewState", type: AttributeType.STRING },
++  sortKey: { name: "eventId", type: AttributeType.STRING },
++  projectionType: ProjectionType.INCLUDE,
++  nonKeyAttributes: ["stripeRefundId", "outcome"],
++});
++
+ /*
+  * Stripe Checkout session creator.
+  *
+@@ -1187,14 +1200,9 @@ checkoutAttemptTable.grant(
+   "dynamodb:UpdateItem",
+ );
+ 
+-stripeEventTable.grant(
+-  backend
+-    .stripeWebhook
+-    .resources
+-    .lambda,
+-  "dynamodb:GetItem",
+-  "dynamodb:PutItem",
+-);
++backend.stripeWebhook.resources.lambda.addToRolePolicy(new PolicyStatement({
++  actions: ["dynamodb:GetItem", "dynamodb:PutItem"], resources: [stripeEventTable.tableArn],
++}));
+ 
+ billingPurchaseTable.grant(
+   backend
+@@ -1510,7 +1518,7 @@ const reconcileLambda = backend.adminReconcileRefund.resources.lambda;
+ billingRefundTable.grant(reconcileLambda, "dynamodb:GetItem", "dynamodb:UpdateItem");
+ billingPurchaseTable.grant(reconcileLambda, "dynamodb:GetItem");
+ entitlementTable.grant(reconcileLambda, "dynamodb:GetItem", "dynamodb:UpdateItem");
+-stripeEventTable.grant(reconcileLambda, "dynamodb:PutItem");
++reconcileLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:PutItem"], resources: [stripeEventTable.tableArn] }));
+ reconcileLambda.addToRolePolicy(new PolicyStatement({
+   actions: ["dynamodb:Query"],
+   resources: [`${billingPurchaseTable.tableArn}/index/userId-index`],
+@@ -1520,6 +1528,23 @@ backend.adminReconcileRefund.addEnvironment("BILLING_PURCHASE_TABLE_NAME", billi
+ backend.adminReconcileRefund.addEnvironment("ENTITLEMENT_TABLE_NAME", entitlementTable.tableName);
+ backend.adminReconcileRefund.addEnvironment("STRIPE_EVENT_TABLE_NAME", stripeEventTable.tableName);
+ 
++const importLambda = backend.adminImportExternalRefund.resources.lambda;
++importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"], resources: [billingRefundTable.tableArn] }));
++importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem", "dynamodb:ConditionCheckItem"], resources: [billingPurchaseTable.tableArn] }));
++importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem", "dynamodb:UpdateItem"], resources: [entitlementTable.tableArn] }));
++importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem", "dynamodb:PutItem"], resources: [stripeEventTable.tableArn] }));
++importLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:Query"], resources: [`${billingPurchaseTable.tableArn}/index/userId-index`] }));
++backend.adminImportExternalRefund.addEnvironment("BILLING_REFUND_TABLE_NAME", billingRefundTable.tableName);
++backend.adminImportExternalRefund.addEnvironment("BILLING_PURCHASE_TABLE_NAME", billingPurchaseTable.tableName);
++backend.adminImportExternalRefund.addEnvironment("ENTITLEMENT_TABLE_NAME", entitlementTable.tableName);
++backend.adminImportExternalRefund.addEnvironment("STRIPE_EVENT_TABLE_NAME", stripeEventTable.tableName);
++const reviewLambda = backend.adminListRefundReviews.resources.lambda;
++reviewLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem"], resources: [stripeEventTable.tableArn] }));
++reviewLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:GetItem"], resources: [billingRefundTable.tableArn] }));
++reviewLambda.addToRolePolicy(new PolicyStatement({ actions: ["dynamodb:Query"], resources: [`${stripeEventTable.tableArn}/index/reviewState-eventId-index`] }));
++backend.adminListRefundReviews.addEnvironment("STRIPE_EVENT_TABLE_NAME", stripeEventTable.tableName);
++backend.adminListRefundReviews.addEnvironment("BILLING_REFUND_TABLE_NAME", billingRefundTable.tableName);
++
+ 
+ /*
+  * Operational monitoring.
+diff --git a/amplify/data/admin-import-external-refund/handler.ts b/amplify/data/admin-import-external-refund/handler.ts
+new file mode 100644
+index 0000000..fc5f318
+--- /dev/null
++++ b/amplify/data/admin-import-external-refund/handler.ts
+@@ -0,0 +1,123 @@
++import { DynamoDBClient, GetItemCommand, TransactWriteItemsCommand, type AttributeValue } from "@aws-sdk/client-dynamodb";
++import Stripe from "stripe";
++import type { Schema } from "../resource";
++import { assertAdmin, requireEnv, requiredString } from "../complaints/shared";
++import { applyRefundObservation, recordExternalRefundReview } from "../../shared/refund-reconciliation";
++
++// Injected by the function resource; no generated environment module required.
++const env = { STRIPE_REFUND_READ_KEY: requireEnv("STRIPE_REFUND_READ_KEY"), STRIPE_EXPECTED_LIVEMODE: requireEnv("STRIPE_EXPECTED_LIVEMODE") };
++const db = new DynamoDBClient({});
++const stripe = new Stripe(env.STRIPE_REFUND_READ_KEY, { maxNetworkRetries: 0, timeout: 10_000 });
++const sessionPattern = /^cs_(?:test|live)_[A-Za-z0-9]{8,220}$/;
++const refundPattern = /^(?:re|pyr)_[A-Za-z0-9]{8,220}$/;
++const id = (value: string | { id: string } | null) => typeof value === "string" ? value : value?.id;
++
++export const handler: Schema["adminImportExternalRefund"]["functionHandler"] = async (event) => {
++  const adminId = assertAdmin(event.identity);
++  const { stripeCheckoutSessionId: sessionId, stripeRefundId: refundId, confirmationSessionId, confirmationRefundId } = event.arguments;
++  if (!sessionPattern.test(sessionId) || !refundPattern.test(refundId) ||
++      sessionId !== confirmationSessionId || refundId !== confirmationRefundId) {
++    throw new Error("Nieprawidłowe potwierdzenie zakupu i istniejącego zwrotu.");
++  }
++  const mode = env.STRIPE_EXPECTED_LIVEMODE;
++  if ((mode !== "true" && mode !== "false") ||
++      !env.STRIPE_REFUND_READ_KEY.startsWith(mode === "true" ? "rk_live_" : "rk_test_") ||
++      !sessionId.startsWith(mode === "true" ? "cs_live_" : "cs_test_")) {
++    throw new Error("Invalid Stripe read-only environment configuration.");
++  }
++  const purchases = requireEnv("BILLING_PURCHASE_TABLE_NAME");
++  const refunds = requireEnv("BILLING_REFUND_TABLE_NAME");
++  const events = requireEnv("STRIPE_EVENT_TABLE_NAME");
++  const key = { stripeCheckoutSessionId: { S: sessionId } };
++  const { Item: purchase } = await db.send(new GetItemCommand({ TableName: purchases, Key: key, ConsistentRead: true }));
++  if (!purchase) throw new Error("Nie znaleziono zakupu w lokalnej księdze.");
++  const userId = requiredString(purchase, "userId");
++  const customerId = requiredString(purchase, "stripeCustomerId");
++  const piId = requiredString(purchase, "stripePaymentIntentId");
++  const currency = requiredString(purchase, "currency");
++  const amount = Number(purchase.amountTotal?.N);
++  if (requiredString(purchase, "stripeCheckoutSessionId") !== sessionId || !/^pi_[A-Za-z0-9]{8,220}$/.test(piId) ||
++      !Number.isSafeInteger(amount) || amount <= 0 || !/^[a-z]{3}$/.test(currency)) {
++    throw new Error("Nieprawidłowy zapis zakupu.");
++  }
++  const review = async (reason: string) => {
++    // A bounded key per refund/purchase/reason, never client text or Stripe error messages.
++    await recordExternalRefundReview({ id: refundId } as Stripe.Refund, `import_${sessionId}_${refundId}_${reason}`, reason);
++    return { status: `MANUAL_REVIEW_${reason}`, stripeRefundId: refundId };
++  };
++  let refund: Stripe.Refund;
++  try {
++    refund = await stripe.refunds.retrieve(refundId);
++  } catch (error) {
++    if (error instanceof Stripe.errors.StripeInvalidRequestError && error.code === "resource_missing") return review("UNKNOWN_REFUND");
++    throw error;
++  }
++  if (!id(refund.payment_intent)) return review("MISSING_PAYMENT_INTENT");
++  if (refund.id !== refundId || id(refund.payment_intent) !== piId) return review("PAYMENT_MISMATCH");
++  let pi: Stripe.PaymentIntent;
++  try { pi = await stripe.paymentIntents.retrieve(piId); }
++  catch (error) {
++    if (error instanceof Stripe.errors.StripeInvalidRequestError && error.code === "resource_missing") return review("MISSING_PAYMENT");
++    throw error;
++  }
++  if (pi.id !== piId || pi.livemode !== (mode === "true") || pi.status !== "succeeded" ||
++      id(pi.customer) !== customerId || pi.amount !== amount || pi.amount_received !== amount ||
++      pi.currency !== currency || refund.currency !== currency) return review("PAYMENT_MISMATCH");
++  // Verify that the selected immutable local session is the actual Stripe payment,
++  // not another local purchase accidentally associated with the same PaymentIntent.
++  let checkout: Stripe.Checkout.Session;
++  try { checkout = await stripe.checkout.sessions.retrieve(sessionId); }
++  catch (error) {
++    if (error instanceof Stripe.errors.StripeInvalidRequestError && error.code === "resource_missing") return review("CHECKOUT_MISMATCH");
++    throw error;
++  }
++  if (checkout.id !== sessionId || checkout.livemode !== (mode === "true") || checkout.mode !== "payment" ||
++      checkout.payment_status !== "paid" || id(checkout.payment_intent) !== piId || id(checkout.customer) !== customerId ||
++      checkout.amount_total !== amount || checkout.currency !== currency) return review("CHECKOUT_MISMATCH");
++  if (refund.amount !== amount) return review("PARTIAL_OR_AMOUNT");
++  if (refund.status !== "succeeded") return review("NOT_SUCCEEDED");
++  const existing = await stripe.refunds.list({ payment_intent: piId, limit: 100 });
++  if (existing.has_more || existing.data.length !== 1 || existing.data[0].id !== refundId ||
++      existing.data[0].status !== "succeeded" || existing.data[0].amount !== amount ||
++      existing.data[0].currency !== currency || id(existing.data[0].payment_intent) !== piId) return review("MULTIPLE_OR_AMBIGUOUS");
++
++  const getReserved = async () => (await db.send(new GetItemCommand({ TableName: refunds, Key: key, ConsistentRead: true }))).Item;
++  const matches = (item: Record<string, AttributeValue>) => item.origin?.S === "EXTERNAL_IMPORT" &&
++    item.stripeRefundId?.S === refundId && item.stripePaymentIntentId?.S === piId && item.userId?.S === userId &&
++    item.stripeCustomerId?.S === customerId && item.amount?.N === String(amount) && item.currency?.S === currency;
++  const prior = await getReserved();
++  if (prior && !matches(prior)) return review("CONFLICT");
++  if (!prior) {
++    const now = new Date().toISOString();
++    try {
++      await db.send(new TransactWriteItemsCommand({ TransactItems: [
++        { ConditionCheck: { TableName: purchases, Key: key,
++          ConditionExpression: "userId = :user AND stripeCustomerId = :customer AND stripePaymentIntentId = :pi AND amountTotal = :amount AND currency = :currency",
++          ExpressionAttributeValues: { ":user": { S: userId }, ":customer": { S: customerId }, ":pi": { S: piId }, ":amount": { N: String(amount) }, ":currency": { S: currency } },
++        } },
++        { Put: { TableName: refunds, ConditionExpression: "attribute_not_exists(stripeCheckoutSessionId)", Item: {
++          ...key, origin: { S: "EXTERNAL_IMPORT" }, stripeRefundId: { S: refundId }, stripePaymentIntentId: { S: piId },
++          userId: { S: userId }, stripeCustomerId: { S: customerId }, adminId: { S: adminId }, amount: { N: String(amount) },
++          currency: { S: currency }, status: { S: "AWAITING_RECONCILIATION" }, createdAt: { S: now }, updatedAt: { S: now },
++        } } },
++        // Independent conditional claims prevent the same Stripe refund/PI being attached to another purchase.
++        ...[`refund_link_${refundId}`, `refund_pi_${piId}`].map((eventId) => ({ Put: {
++          TableName: events, ConditionExpression: "attribute_not_exists(eventId)",
++          Item: { eventId: { S: eventId }, stripeCheckoutSessionId: { S: sessionId }, stripeRefundId: { S: refundId } },
++        } })),
++      ] }));
++    } catch (error) {
++      if ((error as { name?: string }).name !== "TransactionCanceledException") throw error;
++      const competing = await getReserved();
++      if (!competing || !matches(competing)) {
++        // Infrastructure cancellations must propagate; only proven claim conflicts are review outcomes.
++        const link = await db.send(new GetItemCommand({ TableName: events, Key: { eventId: { S: `refund_pi_${piId}` } }, ConsistentRead: true }));
++        if (competing || link.Item) return review("CONFLICT");
++        throw error;
++      }
++    }
++  }
++  // Only this module supplies externalSessionId, after authoritative read-only Stripe verification.
++  const result = await applyRefundObservation(refund, `manual_external_${refundId}_succeeded`, Math.floor(Date.now() / 1000), sessionId);
++  return { status: result.outcome === "DUPLICATE" ? "ALREADY_RECONCILED" : result.outcome, stripeRefundId: refundId };
++};
+diff --git a/amplify/data/admin-import-external-refund/resource.ts b/amplify/data/admin-import-external-refund/resource.ts
+new file mode 100644
+index 0000000..912d0c9
+--- /dev/null
++++ b/amplify/data/admin-import-external-refund/resource.ts
+@@ -0,0 +1,18 @@
++import { defineFunction, secret } from "@aws-amplify/backend";
++
++const stripeExpectedLivemode = process.env.STRIPE_EXPECTED_LIVEMODE?.trim();
++if (stripeExpectedLivemode !== "true" && stripeExpectedLivemode !== "false") {
++  throw new Error("STRIPE_EXPECTED_LIVEMODE must be explicitly configured for reconciliation.");
++}
++
++/** ADMIN-only read-only Stripe observation. Does NOT issue a new refund POST. */
++export const adminImportExternalRefund = defineFunction({
++  name: "admin-import-external-refund",
++  entry: "./handler.ts",
++  resourceGroupName: "data",
++  timeoutSeconds: 60,
++  environment: {
++    STRIPE_REFUND_READ_KEY: secret("STRIPE_REFUND_READ_KEY"),
++    STRIPE_EXPECTED_LIVEMODE: stripeExpectedLivemode,
++  },
++});
+diff --git a/amplify/data/admin-list-refund-reviews/handler.ts b/amplify/data/admin-list-refund-reviews/handler.ts
+new file mode 100644
+index 0000000..23cf2c9
+--- /dev/null
++++ b/amplify/data/admin-list-refund-reviews/handler.ts
+@@ -0,0 +1,33 @@
++import { DynamoDBClient, GetItemCommand, QueryCommand, type AttributeValue } from "@aws-sdk/client-dynamodb";
++import type { Schema } from "../resource";
++import { assertAdmin, requireEnv } from "../complaints/shared";
++const db = new DynamoDBClient({});
++export const handler: Schema["adminListRefundReviews"]["functionHandler"] = async (event) => {
++  assertAdmin(event.identity);
++  const table = requireEnv("STRIPE_EVENT_TABLE_NAME");
++  let cursor: Record<string, AttributeValue> | undefined;
++  const token = event.arguments.nextToken;
++  if (token) {
++    if (token.length > 2000 || !/^[A-Za-z0-9_-]+$/.test(token)) throw new Error("Invalid cursor");
++    const parsed = JSON.parse(Buffer.from(token, "base64url").toString("utf8"));
++    if (typeof parsed.eventId !== "string" || parsed.eventId.length > 600) throw new Error("Invalid cursor");
++    cursor = { eventId: { S: parsed.eventId }, reviewState: { S: "MANUAL_REVIEW" } };
++  }
++  const result = await db.send(new QueryCommand({ TableName: table, IndexName: "reviewState-eventId-index",
++    KeyConditionExpression: "reviewState = :type", ExpressionAttributeValues: { ":type": { S: "MANUAL_REVIEW" } },
++    Limit: 25, ExclusiveStartKey: cursor,
++  }));
++  const items = [];
++  for (const item of result.Items ?? []) {
++    const refundId = item.stripeRefundId.S!;
++    const { Item: link } = await db.send(new GetItemCommand({ TableName: table, Key: { eventId: { S: `refund_link_${refundId}` } }, ConsistentRead: true }));
++    let outcome = item.outcome.S!;
++    if (link?.stripeCheckoutSessionId?.S) {
++      const { Item: refund } = await db.send(new GetItemCommand({ TableName: requireEnv("BILLING_REFUND_TABLE_NAME"),
++        Key: { stripeCheckoutSessionId: { S: link.stripeCheckoutSessionId.S } }, ConsistentRead: true }));
++      if (refund?.origin?.S === "EXTERNAL_IMPORT" && refund.stripeRefundId?.S === refundId && refund.status?.S === "SUCCEEDED") outcome = "ALREADY_RECONCILED";
++    }
++    items.push({ eventId: item.eventId.S!, stripeRefundId: refundId, outcome });
++  }
++  return { items, nextToken: result.LastEvaluatedKey ? Buffer.from(JSON.stringify({ eventId: result.LastEvaluatedKey.eventId.S })).toString("base64url") : null };
++};
+diff --git a/amplify/data/admin-list-refund-reviews/resource.ts b/amplify/data/admin-list-refund-reviews/resource.ts
+new file mode 100644
+index 0000000..55b7716
+--- /dev/null
++++ b/amplify/data/admin-list-refund-reviews/resource.ts
+@@ -0,0 +1,4 @@
++import { defineFunction } from "@aws-amplify/backend";
++export const adminListRefundReviews = defineFunction({
++  name: "admin-list-refund-reviews", entry: "./handler.ts", resourceGroupName: "data", timeoutSeconds: 30,
++});
+diff --git a/amplify/data/resource.ts b/amplify/data/resource.ts
+index 736ec5d..a27055a 100644
+--- a/amplify/data/resource.ts
++++ b/amplify/data/resource.ts
+@@ -1,3 +1,5 @@
++import { adminImportExternalRefund } from "./admin-import-external-refund/resource";
++import { adminListRefundReviews } from "./admin-list-refund-reviews/resource";
+ import {
+   type ClientSchema,
+   a,
+@@ -541,6 +543,19 @@ createCheckoutSession: a
+       .authorization((allow) => [allow.group("ADMIN")])
+       .handler(a.handler.function(adminInitiateRefund)),
+ 
++    ExternalRefundReview: a.customType({ eventId: a.string().required(), stripeRefundId: a.string().required(), outcome: a.string().required() }),
++    ExternalRefundReviewPage: a.customType({ items: a.ref("ExternalRefundReview").array().required(), nextToken: a.string() }),
++    adminListRefundReviews: a.query()
++      .arguments({ nextToken: a.string() })
++      .returns(a.ref("ExternalRefundReviewPage"))
++      .authorization((allow) => [allow.group("ADMIN")])
++      .handler(a.handler.function(adminListRefundReviews)),
++    adminImportExternalRefund: a.mutation()
++      .arguments({ stripeCheckoutSessionId: a.string().required(), stripeRefundId: a.string().required(), confirmationSessionId: a.string().required(), confirmationRefundId: a.string().required() })
++      .returns(a.ref("AdminInitiateRefundResult"))
++      .authorization((allow) => [allow.group("ADMIN")])
++      .handler(a.handler.function(adminImportExternalRefund)),
++
+     /* ADMIN-only Stripe GET reconciliation; no new refund is issued. */
+     adminReconcileRefund: a
+       .mutation()
+diff --git a/amplify/functions/stripe-webhook/handler.ts b/amplify/functions/stripe-webhook/handler.ts
+index 16be4d1..d64c5d2 100644
+--- a/amplify/functions/stripe-webhook/handler.ts
++++ b/amplify/functions/stripe-webhook/handler.ts
+@@ -12,7 +12,7 @@ import type {
+ } from "aws-lambda";
+ 
+ import Stripe from "stripe";
+-import { applyRefundObservation } from "../../shared/refund-reconciliation";
++import { applyRefundObservation, MissingRefundCorrelation, recordExternalRefundReview } from "../../shared/refund-reconciliation";
+ 
+ import {
+   env,
+@@ -1704,11 +1704,17 @@ export const handler:
+         if (stripeEvent.livemode !== expectedLive) {
+           throw new WebhookContractError("refund_event_wrong_livemode");
+         }
+-        const observation = await applyRefundObservation(
+-          stripeEvent.data.object as Stripe.Refund,
+-          stripeEvent.id,
+-          stripeEvent.created,
+-        );
++        let observation;
++        try {
++          observation = await applyRefundObservation(
++            stripeEvent.data.object as Stripe.Refund, stripeEvent.id, stripeEvent.created,
++          );
++        } catch (error) {
++          if (!(error instanceof MissingRefundCorrelation)) throw error;
++          await recordExternalRefundReview(stripeEvent.data.object as Stripe.Refund, stripeEvent.id, error.reason);
++          console.warn("External refund requires ADMIN review", { eventId: stripeEvent.id, reason: error.reason });
++          return jsonResponse(200, { received: true, reviewRequired: true });
++        }
+         console.info("Refund webhook reconciled", {
+           eventId: stripeEvent.id,
+           outcome: observation.outcome,
+diff --git a/amplify/shared/refund-reconciliation.ts b/amplify/shared/refund-reconciliation.ts
+index cd63c85..5c74145 100644
+--- a/amplify/shared/refund-reconciliation.ts
++++ b/amplify/shared/refund-reconciliation.ts
+@@ -38,7 +38,9 @@ type RefundRecord = {
+   amount: number;
+   currency: string;
+   status: string;
+-  complaintId: string;
++  complaintId: string | null;
++  origin: string;
++  customerId: string | null;
+   lastObservation: number | null;
+ };
+ type Entitlement = {
+@@ -88,9 +90,10 @@ async function recordEventOnly(names: Names, eventId: string, refund: Stripe.Ref
+     await db.send(new PutItemCommand({
+       TableName: names.events,
+       Item: {
+-        eventId: { S: eventId }, eventType: { S: "REFUND_OBSERVATION" },
++        eventId: { S: eventId }, eventType: { S: outcome.startsWith("MANUAL_REVIEW_") ? "EXTERNAL_REFUND_REVIEW" : "REFUND_OBSERVATION" },
+         stripeRefundId: { S: refund.id }, outcome: { S: outcome },
+         processedAt: { S: new Date().toISOString() },
++        ...(outcome.startsWith("MANUAL_REVIEW_") ? { reviewState: { S: "MANUAL_REVIEW" } } : {}),
+       },
+       ConditionExpression: "attribute_not_exists(eventId)",
+     }));
+@@ -103,11 +106,13 @@ async function getRefundRecord(names: Names, sessionId: string): Promise<RefundR
+     TableName: names.refunds,
+     Key: { stripeCheckoutSessionId: { S: sessionId } }, ConsistentRead: true,
+   }));
+-  if (!record) throw new Error("Refund has no durable reservation; investigate Stripe Dashboard before reconciliation.");
++  if (!record) throw new MissingRefundCorrelation("MISSING_RESERVATION");
+   const refundId = record.stripeRefundId?.S ?? null;
+   return {
+     sessionId, refundId,
+-    complaintId: requiredString(record, "complaintId"),
++    complaintId: record.origin?.S === "EXTERNAL_IMPORT" ? null : requiredString(record, "complaintId"),
++    origin: record.origin?.S ?? "INTERNAL",
++    customerId: record.origin?.S === "EXTERNAL_IMPORT" ? requiredString(record, "stripeCustomerId") : null,
+     paymentIntentId: requiredString(record, "stripePaymentIntentId"),
+     userId: requiredString(record, "userId"),
+     amount: positiveNumber(record, "amount"),
+@@ -116,6 +121,15 @@ async function getRefundRecord(names: Names, sessionId: string): Promise<RefundR
+     lastObservation: record.lastObservation?.N ? Number(record.lastObservation.N) : null,
+   };
+ }
++function assertSameAssociation(expected: RefundRecord, latest: RefundRecord, observedRefundId: string) {
++  if (latest.origin !== expected.origin || latest.complaintId !== expected.complaintId ||
++      latest.paymentIntentId !== expected.paymentIntentId || latest.userId !== expected.userId ||
++      latest.amount !== expected.amount || latest.currency !== expected.currency || latest.customerId !== expected.customerId ||
++      (latest.refundId !== null && latest.refundId !== observedRefundId) ||
++      (expected.refundId !== null && latest.refundId !== expected.refundId)) {
++    throw new Error("Refund association changed during reconciliation.");
++  }
++}
+ async function getPurchase(names: Names, sessionId: string): Promise<Item> {
+   const result = await db.send(new GetItemCommand({
+     TableName: names.purchases,
+@@ -175,6 +189,15 @@ async function readAllPurchases(names: Names, userId: string, requiredPurchaseId
+   return purchases;
+ }
+ 
++export class MissingRefundCorrelation extends Error {
++  constructor(public readonly reason: "MISSING_METADATA" | "MISSING_RESERVATION") { super(reason); }
++}
++
++/** Only called after webhook signature and environment verification. No metadata or PII stored. */
++export async function recordExternalRefundReview(refund: Stripe.Refund, eventId: string, reason: string) {
++  await recordEventOnly(tableNames(), eventId, refund, "MANUAL_REVIEW_" + reason);
++}
++
+ export type RefundObservation = { outcome: "SUCCEEDED" | "PENDING" | "FAILED" | "CANCELED" | "REQUIRES_ACTION" | "DUPLICATE"; refundId: string; };
+ 
+ /**
+@@ -183,23 +206,27 @@ export type RefundObservation = { outcome: "SUCCEEDED" | "PENDING" | "FAILED" |
+  * reconciliation Lambda the refund is freshly retrieved from Stripe API.
+  * No new Refund POST is issued here.
+  */
+-export async function applyRefundObservation(refund: Stripe.Refund, eventId: string, observationSeconds: number): Promise<RefundObservation> {
+-  if (!/^evt_[A-Za-z0-9]{8,220}$/.test(eventId) && !/^manual_[A-Za-z0-9_-]{8,220}$/.test(eventId)) {
++export async function applyRefundObservation(refund: Stripe.Refund, eventId: string, observationSeconds: number, externalSessionId?: string): Promise<RefundObservation> {
++  if (!/^evt_[A-Za-z0-9]{8,220}$/.test(eventId) && !/^manual_[A-Za-z0-9_-]{8,280}$/.test(eventId)) {
+     throw new Error("Invalid observation identifier.");
+   }
+   if (!REFUND_PATTERN.test(refund.id)) throw new Error("Invalid Stripe refund ID.");
+   if (!Number.isSafeInteger(observationSeconds) || observationSeconds <= 0) {
+     throw new Error("Invalid Stripe observation timestamp.");
+   }
+-  const sessionId = refund.metadata?.stripeCheckoutSessionId;
++  const sessionId = externalSessionId ?? refund.metadata?.stripeCheckoutSessionId;
+   const complaintId = refund.metadata?.complaintId;
+-  if (!sessionId || !SESSION_PATTERN.test(sessionId) || !complaintId) {
+-    throw new Error("Refund missing trusted correlation metadata; needs manual investigation.");
++  if (!sessionId || !SESSION_PATTERN.test(sessionId) || (!externalSessionId && !complaintId)) {
++    throw new MissingRefundCorrelation("MISSING_METADATA");
+   }
+   const names = tableNames();
+   const record = await getRefundRecord(names, sessionId);
++  // Imported refunds always require fresh API verification through the ADMIN operation.
++  if (!externalSessionId && record.origin === "EXTERNAL_IMPORT") throw new MissingRefundCorrelation("MISSING_METADATA");
+   if (
+-    record.complaintId !== complaintId ||
++    (externalSessionId
++      ? record.origin !== "EXTERNAL_IMPORT" || record.refundId !== refund.id || refund.status !== "succeeded"
++      : record.origin === "EXTERNAL_IMPORT" || record.complaintId !== complaintId) ||
+     !PAYMENT_INTENT_PATTERN.test(record.paymentIntentId) ||
+     record.paymentIntentId !== normalizedPi(refund) ||
+     record.currency !== refund.currency ||
+@@ -213,7 +240,8 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
+     requiredString(purchase, "stripePaymentIntentId") !== record.paymentIntentId ||
+     requiredString(purchase, "userId") !== record.userId ||
+     requiredString(purchase, "currency") !== record.currency ||
+-    positiveNumber(purchase, "amountTotal") !== record.amount
++    positiveNumber(purchase, "amountTotal") !== record.amount ||
++    (externalSessionId && requiredString(purchase, "stripeCustomerId") !== record.customerId)
+   ) {
+     throw new Error("Reserved refund does not match immutable paid purchase.");
+   }
+@@ -242,10 +270,15 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
+     ":now": { S: now },
+     ":pi": { S: record.paymentIntentId },
+     ":amount": { N: String(record.amount) },
+-    ":complaintId": { S: record.complaintId },
++    ":externalOrigin": { S: "EXTERNAL_IMPORT" },
++    ...(!externalSessionId ? { ":complaintId": { S: record.complaintId! } } : {}),
+     ":observation": { N: String(observationSeconds) },
+   };
+ 
++  const associationCondition = externalSessionId
++    ? "#origin = :externalOrigin AND stripeRefundId = :refundId"
++    : "complaintId = :complaintId AND (attribute_not_exists(#origin) OR #origin <> :externalOrigin)";
++
+   if (currentStripeStatus !== "SUCCEEDED") {
+     if (["FAILED", "CANCELED"].includes(record.status)) {
+       await recordEventOnly(names, eventId, refund, "TERMINAL_ALREADY_RECORDED");
+@@ -260,15 +293,16 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
+         }, ConditionExpression: "attribute_not_exists(eventId)" } },
+         { Update: { TableName: names.refunds,
+           Key: { stripeCheckoutSessionId: { S: sessionId } },
+-          ConditionExpression: "#status <> :succeeded AND (attribute_not_exists(stripeRefundId) OR stripeRefundId = :refundId) AND (attribute_not_exists(lastObservation) OR lastObservation <= :observation) AND stripePaymentIntentId = :pi AND amount = :amount AND complaintId = :complaintId",
++          ConditionExpression: "#status <> :succeeded AND (attribute_not_exists(stripeRefundId) OR stripeRefundId = :refundId) AND (attribute_not_exists(lastObservation) OR lastObservation <= :observation) AND stripePaymentIntentId = :pi AND amount = :amount AND " + associationCondition,
+           UpdateExpression: "SET #status = :newStatus, stripeRefundId = :refundId, stripeStatus = :newStatus, lastObservation = :observation, updatedAt = :now",
+-          ExpressionAttributeNames: { "#status": "status" },
++          ExpressionAttributeNames: { "#status": "status", "#origin": "origin" },
+           ExpressionAttributeValues: { ...statusValues, ":succeeded": { S: "SUCCEEDED" } },
+         } },
+       ] }));
+     } catch (error) {
+       if ((error as {name?: string}).name === "TransactionCanceledException") {
+         const latest = await getRefundRecord(names, sessionId);
++        assertSameAssociation(record, latest, refund.id);
+         if (latest.status === "SUCCEEDED" || latest.status === currentStripeStatus ||
+             (latest.lastObservation !== null && latest.lastObservation > observationSeconds)) {
+           return { outcome: "DUPLICATE", refundId: refund.id };
+@@ -281,6 +315,7 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
+ 
+   for (let attempt = 0; attempt < MAX_OPTIMISTIC_RETRIES; attempt++) {
+     const latest = await getRefundRecord(names, sessionId);
++    assertSameAssociation(record, latest, refund.id);
+     if (latest.lastObservation !== null && latest.lastObservation > observationSeconds) {
+       if (latest.status !== "SUCCEEDED") {
+         throw new Error("Out-of-order successful refund requires Stripe API reconciliation.");
+@@ -348,9 +383,9 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
+         }, ConditionExpression: "attribute_not_exists(eventId)" } },
+         { Update: { TableName: names.refunds,
+           Key: { stripeCheckoutSessionId: { S: sessionId } },
+-          ConditionExpression: "#status <> :succeeded AND (attribute_not_exists(stripeRefundId) OR stripeRefundId = :refundId) AND (attribute_not_exists(lastObservation) OR lastObservation <= :observation) AND stripePaymentIntentId = :pi AND amount = :amount AND complaintId = :complaintId",
++          ConditionExpression: "#status <> :succeeded AND (attribute_not_exists(stripeRefundId) OR stripeRefundId = :refundId) AND (attribute_not_exists(lastObservation) OR lastObservation <= :observation) AND stripePaymentIntentId = :pi AND amount = :amount AND " + associationCondition,
+           UpdateExpression: "SET #status = :newStatus, stripeRefundId = :refundId, stripeStatus = :newStatus, lastObservation = :observation, updatedAt = :now, succeededAt = :now",
+-          ExpressionAttributeNames: { "#status": "status" },
++          ExpressionAttributeNames: { "#status": "status", "#origin": "origin" },
+           ExpressionAttributeValues: { ...statusValues, ":succeeded": { S: "SUCCEEDED" } },
+         } },
+         { Update: { TableName: names.entitlements,
+@@ -365,6 +400,7 @@ export async function applyRefundObservation(refund: Stripe.Refund, eventId: str
+     } catch (error) {
+       if ((error as {name?: string}).name !== "TransactionCanceledException") throw error;
+       const latestRecord = await getRefundRecord(names, sessionId);
++      assertSameAssociation(record, latestRecord, refund.id);
+       if (latestRecord.status === "SUCCEEDED") {
+         return { outcome: "DUPLICATE", refundId: refund.id };
+       }
+diff --git a/app/admin/refund-import/page.tsx b/app/admin/refund-import/page.tsx
+new file mode 100644
+index 0000000..8148c03
+--- /dev/null
++++ b/app/admin/refund-import/page.tsx
+@@ -0,0 +1,66 @@
++"use client";
++
++import { useState } from "react";
++import { adminImportExternalRefund, adminListRefundReviews } from "@/lib/services/complaints-service";
++
++type Review = { eventId: string; stripeRefundId: string; outcome: string };
++export default function ExternalRefundImportPage() {
++  const [sessionId, setSessionId] = useState("");
++  const [refundId, setRefundId] = useState("");
++  const [selection, setSelection] = useState<{ session: string; refund: string } | null>(null);
++  const [busy, setBusy] = useState(false);
++  const [message, setMessage] = useState("");
++  const [reviews, setReviews] = useState<Review[]>([]);
++  const [nextToken, setNextToken] = useState<string | null>(null);
++  const load = async (token?: string) => {
++    setBusy(true);
++    try {
++      const page = await adminListRefundReviews(token);
++      setReviews(token ? [...reviews, ...page.items] : page.items);
++      setNextToken(page.nextToken);
++    } catch { setMessage("Nie udało się pobrać kolejki przeglądu."); }
++    finally { setBusy(false); }
++  };
++  const importRefund = async () => {
++    if (!selection || busy) return;
++    setBusy(true);
++    setMessage("");
++    try {
++      const result = await adminImportExternalRefund(selection.session, selection.refund);
++      setMessage(result.status === "SUCCEEDED" ? "Zwrot zaimportowany. Dostęp Premium został przeliczony."
++        : result.status === "ALREADY_RECONCILED" ? "Ten zwrot został już uzgodniony. Nie zmieniono ponownie dostępu."
++        : `Wymagana ręczna kontrola: ${result.status}. Nie zastosowano zwrotu do dostępu.`);
++    } catch { setMessage("Nie potwierdzono wyniku importu. Sprawdź kolejkę i stan zakupu przed kolejną próbą."); }
++    finally { setBusy(false); setSelection(null); }
++  };
++  return <main className="space-y-6">
++    <h1 className="text-2xl font-semibold">Import istniejącego zwrotu Stripe</h1>
++    <p>Ta operacja nie zleca zwrotu pieniędzy. Uzgadnia istniejący pełny zwrot i przelicza Premium po weryfikacji zakupu w księdze i Stripe.</p>
++    <form className="space-y-4" onSubmit={(event) => {
++      event.preventDefault(); setMessage(""); setSelection({ session: sessionId.trim(), refund: refundId.trim() });
++    }}>
++      <label className="block">Identyfikator istniejącego zakupu (Checkout Session)
++        <input className="block w-full rounded border p-2" required maxLength={228} value={sessionId} disabled={busy || !!selection} onChange={(e) => setSessionId(e.target.value)} />
++      </label>
++      <label className="block">Identyfikator istniejącego zwrotu (re_ lub pyr_)
++        <input className="block w-full rounded border p-2" required maxLength={224} value={refundId} disabled={busy || !!selection} onChange={(e) => setRefundId(e.target.value)} />
++      </label>
++      <button className="rounded border p-2" disabled={busy || !!selection}>Przejdź do potwierdzenia</button>
++    </form>
++    {selection && <section className="space-y-3 rounded border p-4" aria-label="Potwierdzenie importu">
++      <p>Potwierdź uzgodnienie zakupu <strong className="break-all">{selection.session}</strong> ze zwrotem <strong className="break-all">{selection.refund}</strong>. Udany import zmieni dostęp Premium właściciela zakupu.</p>
++      <button className="rounded border p-2" disabled={busy} onClick={importRefund}>Potwierdzam import istniejącego zwrotu</button>{" "}
++      <button disabled={busy} onClick={() => setSelection(null)}>Anuluj</button>
++    </section>}
++    {message && <p role="status">{message}</p>}
++    <section className="space-y-3">
++      <h2 className="text-xl">Zewnętrzne zwroty do przeglądu</h2>
++      <p>Sprawdzaj tę kolejkę regularnie. Wpisy pozostają jako historia; ALREADY_RECONCILED oznacza zakończony import. Dane zakupu ustal w zaufanej księdze, nie na podstawie metadanych webhooka.</p>
++      <button className="rounded border p-2" disabled={busy} onClick={() => load()}>Odśwież kolejkę</button>
++      <ul className="space-y-2">{reviews.map((review) => <li className="break-all rounded border p-3" key={review.eventId}>
++        <p>{review.stripeRefundId}: {review.outcome}</p><small>{review.eventId}</small>
++      </li>)}</ul>
++      {nextToken && <button disabled={busy} onClick={() => load(nextToken)}>Pokaż kolejne</button>}
++    </section>
++  </main>;
++}
+diff --git a/components/admin/AdminSidebar.tsx b/components/admin/AdminSidebar.tsx
+index 0b86d76..d2ee15e 100644
+--- a/components/admin/AdminSidebar.tsx
++++ b/components/admin/AdminSidebar.tsx
+@@ -14,6 +14,7 @@ type NavigationItem = {
+ };
+ 
+ const navigationItems: NavigationItem[] = [
++  { href: "/admin/refund-import", label: "Import zwrotów", description: "Przegląd i uzgodnienie Stripe", icon: <BookIcon /> },
+   {
+     href: "/admin",
+     label: "Dashboard",
+diff --git a/docs/SEC-002-external-refunds.md b/docs/SEC-002-external-refunds.md
+new file mode 100644
+index 0000000..de65a63
+--- /dev/null
++++ b/docs/SEC-002-external-refunds.md
+@@ -0,0 +1,154 @@
++# SEC-002 — import istniejących zewnętrznych zwrotów
++
++Status: implementacja lokalna, bez wdrożenia. SEC-002 nie jest w pełni zweryfikowane;
++konieczne są późniejsze testy integracyjne i bezpieczeństwa. Nie wykonano połączeń
++z AWS/Stripe, płatności, zwrotów ani odczytu sekretów.
++
++## Przepływ
++
++1. Webhook weryfikuje podpis i tryb Stripe. Tylko jawny `MissingRefundCorrelation`
++   (brak metadanych/rezerwacji albo rekord importowany wymagający odczytu API)
++   uruchamia zapis do StripeEvent z kluczem Stripe event ID i warunkiem nieistnienia.
++   Nie zapisujemy payloadu, metadanych reklamacji, klienta, PaymentIntent ani kwoty.
++   Zdarzenie zawiera refund ID, stały kod powodu, czas zapisu i znacznik kolejki.
++   Powtórzenie jest bezpieczne; awaria zapisu oznacza HTTP 500, nigdy pozorne 200.
++   Niespójność istniejącej rezerwacji i nieoczekiwane wyjątki nadal powodują 500.
++2. ADMIN otwiera `/admin/refund-import`, odświeża stronicowaną kolejkę i ustala
++   zakup w zaufanej księdze. Wpisuje Checkout Session i refund ID, następnie
++   potwierdza oba identyfikatory w osobnym kroku. Operacja nie tworzy refundu.
++3. AppSync i Lambda niezależnie wymagają ADMIN. Lambda pobiera lokalny zakup
++   silnie spójnie, a z API Stripe odczytuje Refund, PaymentIntent, Checkout Session
++   i pełną listę refundów (limit 100, `has_more` blokuje import).
++4. Wyłącznie pojedynczy pełny refund `succeeded`, zgodny z PI, customer, kwotą
++   w jednostkach minor, walutą, opłaconym Checkout i trybem środowiska, może być
++   zarezerwowany. Dane właściciela pochodzą z niezmiennego BillingPurchase.
++5. Transakcja sprawdza snapshot zakupu i tworzy warunkowo BillingRefund pod
++   istniejącym PK `stripeCheckoutSessionId`, z `origin=EXTERNAL_IMPORT`, bez
++   fikcyjnego complaintId. W StripeEvent zapisuje nieusuwalne roszczenia
++   `refund_link_<refundId>` i `refund_pi_<piId>`, zabezpieczając również powiązanie
++   refund/PI z pojedynczym zakupem. Rekordy te nie są webhookami.
++6. Wspólny reconciler sprawdza marker, refund, PI, właściciela, klienta, kwotę
++   i walutę; transakcyjnie zapisuje wynik, status refundu i przeliczone Entitlement.
++   Zachowuje blokadę wersji, odczyt zakupów ocalałych i ochronę przed starszymi
++   obserwacjami. Powtórny import nie zmienia ponownie dostępu.
++
++## Kolejka i obsługa operacyjna
++
++`adminListRefundReviews` ma odrębne uprawnienia tylko do odczytu i korzysta ze
++sparse GSI `reviewState-eventId-index`. Strony mają do 25 wpisów. Kolejkę należy
++sprawdzać regularnie; jest to mechanizm przeglądu, nie nowe powiadomienie push.
++Istniejące alarmy HTTP 5xx pozostają bez zmian. Lista jest ostatecznie spójna.
++Historyczne wpisy pozostają zachowane. Po imporcie ich wyświetlany wynik jest
++wyliczany jako ALREADY_RECONCILED na podstawie silnie spójnego odczytu roszczenia
++refund ID i końcowego BillingRefund. Nie zakładamy atomowego zamknięcia wszystkich
++historycznych wpisów ani usuwania historii. Kolejka może mieć wiele zdarzeń dla
++jednego refundu, ale nigdy nie skutkuje automatycznym odebraniem Premium.
++
++Odmowy znane podczas importu są również utrwalane idempotentnie pod ograniczonym
++kluczem zakup/refund/powód, bez dowolnego tekstu administratora lub błędu Stripe.
++Nieznany refund, brak PI, błędny klient/Checkout/kwota/waluta, stany inne niż
++succeeded, częściowe i wielokrotne refundy wymagają ręcznej kontroli. Błędy
++infrastruktury propagują się; nie są zamieniane na sukces ani manual-review.
++Po awarii pomiędzy rezerwacją i reconciliation ponowny import ponownie weryfikuje
++Stripe i kontynuuje istniejący rekord. Webhook nigdy nie finalizuje importowanego
++refundu samodzielnie: dla tej ścieżki wymagany jest świeży odczyt API przez ADMIN.
++
++## Uprawnienia
++
++Nowa Lambda importująca korzysta wyłącznie z `STRIPE_REFUND_READ_KEY` (restricted
++`rk_test_`/`rk_live_` zgodnego z istniejącym trybem). Nie otrzymuje
++`STRIPE_SECRET_KEY`, nie zawiera `refunds.create` i ma `maxNetworkRetries=0`.
++Konfiguracja istniejącego restricted key musi zezwalać wyłącznie na wymagane
++odczyty Refunds, PaymentIntents i Checkout Sessions, bez praw zapisu/tworzenia
++refundów. Sam prefiks rk nie dowodzi read-only — rzeczywiste uprawnienia klucza
++muszą zostać niezależnie sprawdzone przed wdrożeniem. Nie zweryfikowano ich tutaj.
++Nie zmieniono trybu LIVE ani `REFUND_EXECUTION_ENABLED`.
++
++IAM importu: GetItem/PutItem/UpdateItem dla BillingRefund, GetItem i
++ConditionCheckItem dla BillingPurchase, Query wyłącznie na userId-index,
++GetItem/UpdateItem dla Entitlement i GetItem/PutItem dla StripeEvent.
++IAM kolejki: GetItem dla StripeEvent i BillingRefund, Query wyłącznie na nowym
++GSI. Polityki nowych operacji używają konkretnych ARN tabel/indeksów, bez DynamoDB wildcard.
++Istniejące granty StripeEvent webhooka i adminReconcileRefund zastąpiono również
++jawnymi ARN tabeli, aby dodanie GSI nie dopisało przez helper CDK `index/*`.
++Entitlement jest modyfikowane wyłącznie przez zweryfikowany wspólny reconciler.
++Kod infrastruktury jest przygotowany, ale żadne zasoby nie zostały wdrożone.
++
++## Zgodność i ograniczenia
++
++Wewnętrzny adminInitiateRefund i jego UI pozostają bez zmian: ADMIN, zatwierdzona
++reklamacja, rezerwacja, weryfikacja zakupu/PI, idempotency key i circuit breaker.
++Brak origin oznacza dotychczasowy rekord wewnętrzny; wymaganie complaintId
++pozostaje dla niego obowiązkowe. Import nie może przejąć istniejącej rezerwacji
++wewnętrznej, nawet jeśli wskazany refund pasuje — pozostaje stara operacja
++adminReconcileRefund. Nie zmieniono SEC-001/MFA ani ARCH-003.
++
++Nie obsługujemy automatycznie refundów częściowych, wielu refundów (również
++historycznych nieudanych obok udanego), sporów, zwrotów bez jednoznacznego PI,
++uszkodzonej księgi ani specjalnych wcześniejszych blokad Entitlement.
++Limit reconciler: 100 zakupów użytkownika; opóźniony GSI blokuje bezpieczne
++przeliczenie. Błąd reconciler po rezerwacji wymaga ponownego importu/kontroli.
++Weryfikacja Stripe i DynamoDB nie stanowi wspólnej transakcji rozproszonej;
++pojedynczy pełny succeeded refund ogranicza ryzyko równoległych zmian w Dashboard.
++Kolejka nie ustala automatycznie właściciela z metadanych; operator musi ustalić
++zakup niezależnie. Historia i roszczenia nie mają TTL, aby zachować idempotencję.
++
++## Koszty AWS
++
++Bez wdrożenia brak nowych kosztów AWS w tej fazie. Po przyszłym wdrożeniu:
++dwie Lambdy uruchamiane na żądanie, zapisy zdarzeń i dwóch roszczeń przy imporcie,
++transakcje DynamoDB oraz silnie spójne odczyty. Sparse GSI zwiększa storage i
++koszt zapisów wyłącznie dla rekordów kolejki. Widok wykonuje do 25 odczytów
++roszczeń i do 25 dodatkowych odczytów BillingRefund na stronę. Reconciliation
++zachowuje istniejący limit pracy dla 100 zakupów. Historia rośnie z liczbą
++zdarzeń i par zakup/refund zgłaszanych przez ADMIN. Brak pollingu, harmonogramu
++lub nowej stałej floty; istniejące logowanie/monitoring nadal generuje swoje koszty.
++
++## Testy do wykonania w fazie skonsolidowanej — wszystkie NOT RUN
++
++### Jednostkowe
++
++- ADMIN i odmowa dla gościa, zwykłego użytkownika, brakujących/zmienionych claims.
++- Potwierdzenie obu identyfikatorów, walidacja cs_, re_, pyr_, granice długości.
++- Brak metadanych vs brak rezerwacji vs wyjątek odczytu/uszkodzony rekord.
++- Dokładne dane PI, Checkout, właściciela i klienta; grosze zamiast kwoty decimal.
++- Nieznany refund/PI/Checkout, brak PI, inna waluta/kwota/tryb, niepoprawny klucz.
++- Refund partial/pending/failed/canceled/requires_action/null oraz wiele refundów,
++  lista pusta/has_more i zmiana danych pomiędzy retrieve a list.
++- Warunki DynamoDB, brak nieużytych expression aliases/values, brak complaintId
++  dla importu, brak możliwości obejścia wewnętrznej rezerwacji/metadanych.
++- Idempotencja udanego importu, niezmienność asocjacji przy ponownym odczycie.
++- Błędy API/DB propagują się; tylko resource_missing daje jawny manual-review.
++- Brak refund POST/automatycznego retry i brak sekretów/PII w logach/API.
++- Kolejka: paginacja, wadliwy token, opóźnienie indeksu, historyczny resolved,
++  brak dostępu do innych partycji, brak rozszerzania uprawnień z cursor.
++- UI: krok potwierdzenia, zablokowanie podwójnego kliknięcia, anulowanie,
++  success/already-reconciled/manual-review/nieznany wynik i ochrona ADMIN.
++
++### Integracyjne i bezpieczeństwa (wyłącznie późniejsze autoryzowane środowisko TEST)
++
++- Prawidłowy i błędny podpis webhooka; zły tryb; brak korelacji utrwalony przed
++  2xx; awaria/throttling zapisu daje 5xx i późniejszy retry zapisuje jeden wpis.
++- Dwa identyczne webhooki, webhook przed/podczas/po imporcie; brak podwójnej
++  korekty Entitlement i widoczna historia przeglądu.
++- Dwa importy tego samego refundu i dwa różne refundy/zakupy z tym samym PI;
++  jeden zwycięzca warunkowych roszczeń, konflikt bez częściowego zapisu.
++- Import ściga się z wewnętrzną rezerwacją; wewnętrzna inicjacja po imporcie
++  nie wykonuje POST; istniejący internal reconciler działa bez zmian.
++- Awaria po rezerwacji, przed/po commit; timeout odpowiedzi po commit;
++  powtórny import odzyskuje wynik i nie zmienia wersji Entitlement drugi raz.
++- Równoległy nowy zakup, inny refund, opóźniony GSI, konflikt wersji,
++  starszy webhook, wcześniejsza blokada Entitlement i limit 100 zakupów.
++- Recalculation dla zera/jednego/wielu ocalałych zakupów i późnych płatności.
++- Rzeczywiste AppSync group auth, Lambda identity, MFA regresja SEC-001,
++  brak zmian LIVE/circuit breaker ARCH-003.
++- Polityki IAM po syntezie: konkretne tabele i GSI, brak Scan/Delete/wildcard,
++  brak praw zapisu dla review Lambda, brak refund-create secret dla importu.
++- Restricted key ma wymagane GET i odmawia refund POST; tryb test/live
++  i konto Stripe odpowiadają zaufanej lokalnej księdze.
++- Dostępność GSI po migracji, opóźnienie widoczności kolejki, uprawnienia
++  operatorów i procedura regularnego przeglądu.
++
++Walidacja lokalna zakończona powodzeniem: TypeScript frontend/backend, ESLint
++zmienionych plików TS/TSX oraz `git diff --check`. Nie uruchamiano testów jednostkowych,
++integracyjnych ani E2E i nie deklarujemy ich powodzenia.
+diff --git a/lib/services/complaints-service.ts b/lib/services/complaints-service.ts
+index 40d6aaf..941c890 100644
+--- a/lib/services/complaints-service.ts
++++ b/lib/services/complaints-service.ts
+@@ -214,3 +214,18 @@ export async function adminReconcileRefund(stripeCheckoutSessionId: string): Pro
+   );
+   return parseRefundOperationResult(requireResult(data, errors, "adminReconcileRefund"));
+ }
++
++export async function adminImportExternalRefund(stripeCheckoutSessionId: string, stripeRefundId: string): Promise<RefundOperationResult> {
++  const { data, errors } = await amplifyClient.mutations.adminImportExternalRefund({
++    stripeCheckoutSessionId, stripeRefundId, confirmationSessionId: stripeCheckoutSessionId, confirmationRefundId: stripeRefundId,
++  }, { authMode: "userPool" });
++  return parseRefundOperationResult(requireResult(data, errors, "adminImportExternalRefund"));
++}
++
++export async function adminListRefundReviews(nextToken?: string) {
++  const { data, errors } = await amplifyClient.queries.adminListRefundReviews({ nextToken }, { authMode: "userPool" });
++  return parsePage(requireResult(data, errors, "adminListRefundReviews"), (value) => {
++    const item = object(value);
++    return { eventId: string(item.eventId), stripeRefundId: string(item.stripeRefundId), outcome: string(item.outcome) };
++  });
++}

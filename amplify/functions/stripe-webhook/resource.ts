@@ -34,6 +34,7 @@ export const stripeWebhook =
     name: "stripe-webhook",
     entry: "./handler.ts",
     resourceGroupName: "data",
+    timeoutSeconds: 20,
 
     environment: {
       STRIPE_WEBHOOK_SECRET:
