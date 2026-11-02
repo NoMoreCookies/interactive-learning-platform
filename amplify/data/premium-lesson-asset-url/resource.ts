@@ -7,4 +7,5 @@ export const premiumLessonAssetUrl =
     name: "premium-lesson-asset-url",
     entry: "./handler.ts",
     resourceGroupName: "data",
+    timeoutSeconds: 10,
   });

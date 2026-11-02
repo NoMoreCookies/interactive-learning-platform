@@ -1,3 +1,4 @@
+import { boundedAwsOptions, budgetedClient, withResolverBudget } from "../../shared/resolver-budget";
 import {
   DynamoDBClient,
   QueryCommand,
@@ -9,7 +10,7 @@ import type {
 } from "../resource";
 
 const dynamoDb =
-  new DynamoDBClient({});
+  budgetedClient(new DynamoDBClient(boundedAwsOptions));
 
 const MAX_SLUG_LENGTH = 200;
 
@@ -435,7 +436,7 @@ async function queryPublishedLessonsByModule(
 
 export const handler:
   Schema["getPublishedCourseOutline"]["functionHandler"] =
-  async (event) => {
+  async (event) => withResolverBudget(12_000, async () => {
     const courseTableName =
       process.env
         .COURSE_TABLE_NAME;
@@ -748,4 +749,4 @@ export const handler:
         "Nie udało się pobrać struktury kursu.",
       );
     }
-  };
+  });

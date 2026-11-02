@@ -7,4 +7,5 @@ export const premiumLessonContent =
     name: "premium-lesson-content",
     entry: "./handler.ts",
     resourceGroupName: "data",
+    timeoutSeconds: 15,
   });

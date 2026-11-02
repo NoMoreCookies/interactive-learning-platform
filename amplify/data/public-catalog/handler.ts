@@ -1,3 +1,4 @@
+import { boundedAwsOptions, budgetedClient, withResolverBudget } from "../../shared/resolver-budget";
 import {
   DynamoDBClient,
   ScanCommand,
@@ -6,7 +7,7 @@ import {
 
 import type { Schema } from "../resource";
 
-const dynamoDb = new DynamoDBClient({});
+const dynamoDb = budgetedClient(new DynamoDBClient(boundedAwsOptions));
 
 type DynamoDbItem =
   Record<string, AttributeValue>;
@@ -83,7 +84,7 @@ function getRequiredInteger(
 }
 
 export const handler: Schema["listPublishedCourses"]["functionHandler"] =
-  async () => {
+  async () => withResolverBudget(8_000, async () => {
     const tableName =
       process.env.COURSE_TABLE_NAME;
 
@@ -232,4 +233,4 @@ export const handler: Schema["listPublishedCourses"]["functionHandler"] =
         "Nie udało się pobrać katalogu kursów.",
       );
     }
-  };
+  });

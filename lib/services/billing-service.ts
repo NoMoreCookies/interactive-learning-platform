@@ -1,3 +1,4 @@
+import { getCurrentUser } from "aws-amplify/auth";
 import {
   amplifyClient,
 } from "@/lib/amplify-client";
@@ -73,6 +74,15 @@ export async function createCheckoutSession(
     );
   }
 
+  // Opaque operation identifier only, never a token or payment credential.
+  // Keep it across network failures and the Stripe cancel redirect.
+  const user = await getCurrentUser();
+  const intentKey = `checkout-intent:${user.userId}`;
+  let purchaseIntentId = sessionStorage.getItem(intentKey);
+  if (!purchaseIntentId) {
+    purchaseIntentId = crypto.randomUUID();
+    sessionStorage.setItem(intentKey, purchaseIntentId);
+  }
   const {
     data,
     errors,
@@ -80,6 +90,7 @@ export async function createCheckoutSession(
     await amplifyClient.mutations
       .createCheckoutSession(
         {
+          purchaseIntentId,
           planCode,
 
           immediateDeliveryConsent:
@@ -119,6 +130,17 @@ export async function createCheckoutSession(
     );
   }
 
+  if (data.status === "EXPIRED") {
+    if (sessionStorage.getItem(intentKey) === purchaseIntentId) sessionStorage.removeItem(intentKey);
+    throw new Error("Poprzednia sesja wygasła. Rozpocznij zakup ponownie.");
+  }
+  if (data.status === "COMPLETED") {
+    if (!data.sessionId || !/^cs_(?:test|live)_[A-Za-z0-9]{8,220}$/.test(data.sessionId)) {
+      throw new Error("Nieprawidłowe potwierdzenie zakończonego zakupu.");
+    }
+    if (sessionStorage.getItem(intentKey) === purchaseIntentId) sessionStorage.removeItem(intentKey);
+    return { status: "READY", url: `/checkout/success?session_id=${encodeURIComponent(data.sessionId)}`, retryAfterSeconds: null };
+  }
   if (
     data.status ===
     "READY"
@@ -135,6 +157,7 @@ export async function createCheckoutSession(
       );
     }
 
+    if (data.sessionId) sessionStorage.setItem(`${intentKey}:session:${purchaseIntentId}`, data.sessionId);
     return {
       status:
         "READY",
@@ -281,6 +304,16 @@ export async function getMyCheckoutResult(
     );
   }
 
+  if (data.status === "COMPLETED") {
+    const user = await getCurrentUser();
+    const key = `checkout-intent:${user.userId}`;
+    const intent = sessionStorage.getItem(key);
+    // An old success URL cannot clear the identity of a different open intent.
+    if (intent && sessionStorage.getItem(`${key}:session:${intent}`) === sessionId) {
+      sessionStorage.removeItem(`${key}:session:${intent}`);
+      sessionStorage.removeItem(key);
+    }
+  }
   return {
     status:
       data.status,

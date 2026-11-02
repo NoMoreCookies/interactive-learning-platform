@@ -1,7 +1,5 @@
-import {
-  randomUUID,
-} from "node:crypto";
-
+import { boundedAwsOptions, budgetedClient, resolverBudget, withResolverBudget } from "../../shared/resolver-budget";
+import { recoverOrCreateCheckout } from "../../shared/checkout-session";
 import {
   DynamoDBClient,
   GetItemCommand,
@@ -40,6 +38,7 @@ import {
 } from "../../shared/legal-versions";
 
 type CreateCheckoutSessionArguments = {
+  purchaseIntentId: string;
   planCode: string;
 
   immediateDeliveryConsent:
@@ -50,6 +49,8 @@ type CreateCheckoutSessionArguments = {
 };
 
 type CreateCheckoutSessionResult =
+  | { status: "COMPLETED"; sessionId: string }
+  | { status: "EXPIRED" }
   | {
       status: "READY";
       url: string;
@@ -70,11 +71,12 @@ class CheckoutClientError extends Error {
 }
 
 const dynamoDb =
-  new DynamoDBClient({});
+  budgetedClient(new DynamoDBClient(boundedAwsOptions));
 
 const stripe =
   new Stripe(
     env.STRIPE_SECRET_KEY,
+    { timeout: 2_500, maxNetworkRetries: 0 },
   );
 
 /*
@@ -511,6 +513,7 @@ async function getOrCreateStripeCustomer(
    *
    * Email is deliberately not used as the billing identity.
    */
+  resolverBudget().require(5_000);
   const stripeCustomer =
     await stripe.customers.create(
       {
@@ -540,6 +543,7 @@ async function getOrCreateStripeCustomer(
           userId: {
             S: userId,
           },
+          checkoutRecoveryReady: { BOOL: true },
 
           stripeCustomerId: {
             S:
@@ -608,6 +612,7 @@ async function assertStripePriceMatchesPlan(
   const expectedPlan = BILLING_PLANS[planCode];
   const expectedLivemode = getExpectedLivemode();
 
+  resolverBudget().require(4_000);
   const stripePrice = await stripe.prices.retrieve(
     stripePriceId,
   );
@@ -628,159 +633,6 @@ async function assertStripePriceMatchesPlan(
 
 
 
-
-/*
- * Creates the authoritative server-side snapshot of the purchase
- * contract and checkout-specific legal declarations.
- *
- * The browser cannot supply:
- *
- * - userId,
- * - timestamp,
- * - price,
- * - currency,
- * - access duration,
- * - Stripe Price ID,
- * - legal document versions,
- * - billing contract version,
- * - consent version.
- *
- * Those values are resolved exclusively by trusted backend code.
- */
-async function createCheckoutAttempt(
-  userId: string,
-  stripeCustomerId: string,
-  planCode: BillingPlanCode,
-  stripePriceId: string,
-): Promise<string> {
-  const checkoutAttemptId =
-    randomUUID();
-
-  const plan =
-    BILLING_PLANS[
-      planCode
-    ];
-
-  const timestamp =
-    new Date()
-      .toISOString();
-
-  await dynamoDb.send(
-    new PutItemCommand({
-      TableName:
-        checkoutAttemptTableName,
-
-      Item: {
-        checkoutAttemptId: {
-          S:
-            checkoutAttemptId,
-        },
-
-        userId: {
-          S:
-            userId,
-        },
-
-        stripeCustomerId: {
-          S:
-            stripeCustomerId,
-        },
-
-        planCode: {
-          S:
-            planCode,
-        },
-
-        billingContractVersion: {
-          S:
-            BILLING_CONTRACT_VERSION,
-        },
-
-        stripePriceId: {
-          S:
-            stripePriceId,
-        },
-
-        amountTotal: {
-          N: String(
-            plan.unitAmount,
-          ),
-        },
-
-        currency: {
-          S:
-            plan.currency,
-        },
-
-        checkoutMode: {
-          S:
-            plan.checkoutMode,
-        },
-
-        accessDays: {
-          N: String(
-            plan.accessDays,
-          ),
-        },
-
-        termsVersion: {
-          S:
-            CURRENT_TERMS_VERSION,
-        },
-
-        privacyVersion: {
-          S:
-            CURRENT_PRIVACY_VERSION,
-        },
-
-        checkoutConsentVersion: {
-          S:
-            CHECKOUT_CONSENT_VERSION,
-        },
-
-        immediateDeliveryConsent: {
-          BOOL:
-            true,
-        },
-
-        withdrawalRightLossAcknowledged:
-          {
-            BOOL:
-              true,
-          },
-
-        consentedAt: {
-          S:
-            timestamp,
-        },
-
-        status: {
-          S:
-            "CREATED",
-        },
-
-        createdAt: {
-          S:
-            timestamp,
-        },
-
-        updatedAt: {
-          S:
-            timestamp,
-        },
-      },
-
-      /*
-       * UUID collisions are extraordinarily unlikely, but the
-       * database invariant is still explicit.
-       */
-      ConditionExpression:
-        "attribute_not_exists(checkoutAttemptId)",
-    }),
-  );
-
-  return checkoutAttemptId;
-}
 
 function getSafeErrorDetails(
   error: unknown,
@@ -838,7 +690,7 @@ export const handler:
     CreateCheckoutSessionArguments,
     CreateCheckoutSessionResult
   > =
-  async (event) => {
+  async (event) => withResolverBudget(24_000, async () => {
     try {
       const rawPlanCode =
         event.arguments
@@ -854,8 +706,11 @@ export const handler:
         );
       }
 
-      const planCode =
-        rawPlanCode;
+      const planCode = rawPlanCode;
+      const purchaseIntentId = event.arguments.purchaseIntentId;
+      if (typeof purchaseIntentId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(purchaseIntentId)) {
+        throw new CheckoutClientError("Nieprawidłowy identyfikator próby zakupu.");
+      }
 
       /*
        * Checkout-specific declarations are validated before the
@@ -938,119 +793,20 @@ export const handler:
       const appBaseUrl =
         getAppBaseUrl();
 
-      /*
-       * Persist the authoritative purchase/consent snapshot BEFORE a
-       * Stripe Checkout Session is created.
-       *
-       * This guarantees that every session created by this backend
-       * refers to a pre-existing trusted CheckoutAttempt.
-       */
-      const checkoutAttemptId =
-        await createCheckoutAttempt(
-          userId,
-          stripeCustomerId,
-          planCode,
-          stripePriceId,
-        );
+      const plan = BILLING_PLANS[planCode];
+      const recovered = await recoverOrCreateCheckout({
+        db: dynamoDb, stripe, attemptsTable: checkoutAttemptTableName,
+        customersTable: env.BILLING_CUSTOMER_TABLE_NAME, budget: resolverBudget(),
+      }, {
+        purchaseIntentId, userId, stripeCustomerId, planCode, stripePriceId, appBaseUrl,
+        livemode: getExpectedLivemode(), amountTotal: plan.unitAmount,
+        currency: plan.currency, accessDays: plan.accessDays,
+        billingContractVersion: BILLING_CONTRACT_VERSION,
+        termsVersion: CURRENT_TERMS_VERSION, privacyVersion: CURRENT_PRIVACY_VERSION,
+        checkoutConsentVersion: CHECKOUT_CONSENT_VERSION,
+      });
+      return recovered.status === "READY" ? { ...recovered, retryAfterSeconds: null } : recovered;
 
-      const metadata = {
-        checkoutAttemptId,
-
-        appUserId:
-          userId,
-
-        planCode,
-
-        billingContractVersion:
-          BILLING_CONTRACT_VERSION,
-
-        stripePriceId,
-
-        termsVersion:
-          CURRENT_TERMS_VERSION,
-
-        privacyVersion:
-          CURRENT_PRIVACY_VERSION,
-
-        checkoutConsentVersion:
-          CHECKOUT_CONSENT_VERSION,
-      };
-
-      const session =
-        await stripe
-          .checkout
-          .sessions
-          .create(
-            {
-              mode:
-                BILLING_PLANS[
-                  planCode
-                ].checkoutMode,
-
-              customer:
-                stripeCustomerId,
-
-              client_reference_id:
-                userId,
-
-              line_items: [
-                {
-                  price:
-                    stripePriceId,
-
-                  quantity:
-                    1,
-                },
-              ],
-
-              success_url:
-                `${appBaseUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
-
-              cancel_url:
-                `${appBaseUrl}/checkout/cancel`,
-
-              locale:
-                "pl",
-
-              metadata,
-
-              payment_intent_data: {
-                metadata,
-              },
-            },
-
-            /*
-             * Protect Stripe-side retries of this exact purchase
-             * attempt from creating more than one Checkout Session.
-             */
-            {
-              idempotencyKey:
-                `poprostumatma:checkout:${checkoutAttemptId}`,
-            },
-          );
-
-      if (!session.url) {
-        throw new Error(
-          "Stripe Checkout Session did not return a URL.",
-        );
-      }
-
-      /*
-       * Only browser-required data leaves the trusted backend.
-       *
-       * CheckoutAttempt IDs, Stripe customer IDs, payment metadata
-       * and billing state remain server-side.
-       */
-      return {
-        status:
-          "READY",
-
-        url:
-          session.url,
-
-        retryAfterSeconds:
-          null,
-      };
     } catch (error) {
       if (
         error instanceof
@@ -1079,4 +835,4 @@ export const handler:
         "Nie udało się utworzyć sesji płatności.",
       );
     }
-  };
+  });

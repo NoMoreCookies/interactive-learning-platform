@@ -2,6 +2,7 @@ import {
   DynamoDBClient,
   GetItemCommand,
   PutItemCommand,
+  UpdateItemCommand,
   TransactWriteItemsCommand,
   type AttributeValue,
 } from "@aws-sdk/client-dynamodb";
@@ -1797,6 +1798,19 @@ export const handler:
           checkout.session.id,
           "PAYMENT_FAILED",
         );
+        try {
+          await dynamoDb.send(new UpdateItemCommand({
+            TableName: checkoutAttemptTableName,
+            Key: { checkoutAttemptId: { S: checkout.attempt.checkoutAttemptId } },
+            UpdateExpression: "SET sessionCreationState = :failed, stripeCheckoutSessionId = :session",
+            ConditionExpression: "#status = :created AND (attribute_not_exists(stripeCheckoutSessionId) OR stripeCheckoutSessionId = :session)",
+            ExpressionAttributeNames: { "#status": "status" },
+            ExpressionAttributeValues: { ":failed": { S: "PAYMENT_FAILED" }, ":session": { S: checkout.session.id }, ":created": { S: "CREATED" } },
+          }));
+        } catch (error) {
+          if (!isConditionalFailure(error)) throw error;
+          // A concurrent successful payment must never be overwritten.
+        }
 
         return jsonResponse(
           200,

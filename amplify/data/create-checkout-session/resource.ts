@@ -28,7 +28,7 @@ export const createCheckoutSession =
     name: "create-checkout-session",
     entry: "./handler.ts",
     resourceGroupName: "data",
-    timeoutSeconds: 15,
+    timeoutSeconds: 28,
 
     environment: {
       STRIPE_SECRET_KEY:

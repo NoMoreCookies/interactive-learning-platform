@@ -1,3 +1,4 @@
+import { boundedAwsOptions, budgetedClient, withResolverBudget } from "../../shared/resolver-budget";
 import {
   DynamoDBClient,
   GetItemCommand,
@@ -26,10 +27,10 @@ import type {
 } from "../resource";
 
 const dynamoDbClient =
-  new DynamoDBClient({});
+  budgetedClient(new DynamoDBClient(boundedAwsOptions));
 
 const s3Client =
-  new S3Client({});
+  budgetedClient(new S3Client(boundedAwsOptions));
 
 type AssetType =
   | "VIDEO"
@@ -185,7 +186,7 @@ function isExpectedAssetPath(
 
 export const handler:
   Schema["getPremiumLessonAssetUrl"]["functionHandler"] =
-  async (event) => {
+  async (event) => withResolverBudget(8_000, async () => {
     try {
       const entitlementTableName =
         getRequiredEnvironmentVariable(
@@ -543,4 +544,4 @@ export const handler:
         "Nie udało się uzyskać dostępu do pliku.",
       );
     }
-  };
+  });

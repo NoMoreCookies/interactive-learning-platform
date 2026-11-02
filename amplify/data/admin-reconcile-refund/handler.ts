@@ -1,3 +1,4 @@
+import { boundedAwsOptions, budgetedClient, resolverBudget, withResolverBudget } from "../../shared/resolver-budget";
 import { DynamoDBClient, GetItemCommand } from "@aws-sdk/client-dynamodb";
 import Stripe from "stripe";
 import { env } from "$amplify/env/admin-reconcile-refund";
@@ -5,11 +6,11 @@ import type { Schema } from "../resource";
 import { assertAdmin, requireEnv } from "../complaints/shared";
 import { applyRefundObservation } from "../../shared/refund-reconciliation";
 
-const db = new DynamoDBClient({});
-const stripe = new Stripe(env.STRIPE_REFUND_READ_KEY, { maxNetworkRetries: 0, timeout: 10_000 });
+const db = budgetedClient(new DynamoDBClient(boundedAwsOptions));
+const stripe = new Stripe(env.STRIPE_REFUND_READ_KEY, { maxNetworkRetries: 0, timeout: 3_000 });
 const sessionPattern = /^cs_(?:test|live)_[A-Za-z0-9]{8,220}$/;
 
-export const handler: Schema["adminReconcileRefund"]["functionHandler"] = async (event) => {
+export const handler: Schema["adminReconcileRefund"]["functionHandler"] = async (event) => withResolverBudget(24_000, async () => {
   assertAdmin(event.identity);
   const sessionId = event.arguments.stripeCheckoutSessionId;
   if (!sessionPattern.test(sessionId)) throw new Error("Nieprawidłowy zakup.");
@@ -35,9 +36,11 @@ export const handler: Schema["adminReconcileRefund"]["functionHandler"] = async 
   const refundId = item.stripeRefundId?.S;
   let refund: Stripe.Refund | undefined;
   if (refundId) {
+    resolverBudget().require(3_500);
     refund = await stripe.refunds.retrieve(refundId);
   } else {
     /* A timed-out POST may have succeeded. Read-only search is safe; a new POST is NOT. */
+    resolverBudget().require(3_500);
     const result = await stripe.refunds.list({
       payment_intent: item.stripePaymentIntentId.S,
       limit: 100,
@@ -58,14 +61,19 @@ export const handler: Schema["adminReconcileRefund"]["functionHandler"] = async 
    * underlying PaymentIntent, which does include livemode, using the same
    * Stripe account's read-only credentials.
    */
+  resolverBudget().require(3_500);
   const paymentIntent = await stripe.paymentIntents.retrieve(item.stripePaymentIntentId.S);
   if (paymentIntent.livemode !== (expectedMode === "true")) {
     throw new Error("Stripe payment environment mismatch.");
   }
+  resolverBudget().require(4_000);
   const observed = await applyRefundObservation(
     refund,
     `manual_${refund.id}_${refund.status}`,
     Math.floor(Date.now() / 1000),
+    undefined,
+    { client: db, signal: resolverBudget().signal,
+      assertTransactionBudget: () => resolverBudget().require(4_000) },
   );
   return { status: observed.outcome, stripeRefundId: observed.refundId };
-};
+});

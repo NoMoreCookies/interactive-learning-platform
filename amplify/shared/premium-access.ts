@@ -1,11 +1,13 @@
+import { boundedAwsOptions, budgetedClient, hasResolverBudget } from "./resolver-budget";
 import {
   DynamoDBClient,
   GetItemCommand,
   type AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 
-const dynamoDb =
-  new DynamoDBClient({});
+const dynamoDb = new DynamoDBClient({});
+// Only the remediated synchronous callers opt into the shorter SDK budget.
+const synchronousDynamoDb = budgetedClient(new DynamoDBClient(boundedAwsOptions));
 
 type DynamoDbItem =
   Record<string, AttributeValue>;
@@ -237,7 +239,7 @@ export async function getPremiumAccessStatus({
   }
 
   const result =
-    await dynamoDb.send(
+    await (hasResolverBudget() ? synchronousDynamoDb : dynamoDb).send(
       new GetItemCommand({
         TableName:
           entitlementTableName,

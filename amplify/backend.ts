@@ -1001,7 +1001,7 @@ stripeEventTable.addGlobalSecondaryIndex({
  *   GetItem only
  *
  * BillingCustomer:
- *   GetItem + PutItem only
+ *   GetItem + PutItem + UpdateItem (active attempt pointer)
  *
  * No access to Entitlement, purchases, subscriptions,
  * Stripe events, course data, or S3.
@@ -1014,33 +1014,23 @@ legalAcceptanceTable.grant(
   "dynamodb:GetItem",
 );
 
-/*
- * Checkout contract / consent snapshot.
- *
- * The checkout creator may only create a new immutable attempt.
- * It cannot read, update, scan, query or delete historical attempts.
+/* Checkout contract fields remain immutable. Recovery reads attempts and
+ * conditionally updates only session lifecycle/association in trusted code.
  */
-checkoutAttemptTable.grant(
-  backend
-    .createCheckoutSession
-    .resources
-    .lambda,
-  "dynamodb:PutItem",
-);
+backend.createCheckoutSession.resources.lambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"],
+  resources: [checkoutAttemptTable.tableArn],
+}));
 
 backend.createCheckoutSession.addEnvironment(
   "CHECKOUT_ATTEMPT_TABLE_NAME",
   checkoutAttemptTable.tableName,
 );
 
-billingCustomerTable.grant(
-  backend
-    .createCheckoutSession
-    .resources
-    .lambda,
-  "dynamodb:GetItem",
-  "dynamodb:PutItem",
-);
+backend.createCheckoutSession.resources.lambda.addToRolePolicy(new PolicyStatement({
+  actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"],
+  resources: [billingCustomerTable.tableArn],
+}));
 
 /*
  * Checkout abuse protection.

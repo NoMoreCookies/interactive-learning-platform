@@ -1,3 +1,4 @@
+import { boundedAwsOptions, budgetedClient, withResolverBudget } from "../../shared/resolver-budget";
 import {
   DynamoDBClient,
   GetItemCommand,
@@ -15,7 +16,7 @@ import type {
 } from "../resource";
 
 const dynamoDb =
-  new DynamoDBClient({});
+  budgetedClient(new DynamoDBClient(boundedAwsOptions));
 
 type DynamoDbItem =
   Record<string, AttributeValue>;
@@ -350,7 +351,7 @@ function sortByOrderAndTitle<
 
 export const handler:
   Schema["getPremiumLessonContent"]["functionHandler"] =
-  async (event) => {
+  async (event) => withResolverBudget(12_000, async () => {
     const courseTableName =
       process.env.COURSE_TABLE_NAME;
 
@@ -662,4 +663,4 @@ export const handler:
         "Nie udało się pobrać treści lekcji.",
       );
     }
-  };
+  });

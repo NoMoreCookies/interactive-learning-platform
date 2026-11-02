@@ -5,4 +5,5 @@ export const publicCatalog =
     name: "public-catalog",
     entry: "./handler.ts",
     resourceGroupName: "data",
+    timeoutSeconds: 10,
   });

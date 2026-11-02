@@ -7,4 +7,5 @@ export const publicCourseOutline =
     name: "public-course-outline",
     entry: "./handler.ts",
     resourceGroupName: "data",
+    timeoutSeconds: 15,
   });

@@ -10,7 +10,7 @@ export const adminReconcileRefund = defineFunction({
   name: "admin-reconcile-refund",
   entry: "./handler.ts",
   resourceGroupName: "data",
-  timeoutSeconds: 60,
+  timeoutSeconds: 28,
   environment: {
     STRIPE_REFUND_READ_KEY: secret("STRIPE_REFUND_READ_KEY"),
     STRIPE_EXPECTED_LIVEMODE: stripeExpectedLivemode,

@@ -1,3 +1,4 @@
+import { boundedAwsOptions, budgetedClient, resolverBudget, withResolverBudget } from "../../shared/resolver-budget";
 import {
   BatchWriteItemCommand,
   DeleteItemCommand,
@@ -23,10 +24,10 @@ import type {
 } from "../resource";
 
 const dynamoDb =
-  new DynamoDBClient({});
+  budgetedClient(new DynamoDBClient(boundedAwsOptions));
 
 const s3 =
-  new S3Client({});
+  budgetedClient(new S3Client(boundedAwsOptions));
 
 const RESOURCE_ID_PATTERN =
   /^[A-Za-z0-9_-]{1,128}$/;
@@ -546,6 +547,7 @@ function chunkArray<T>(
 function sleep(
   milliseconds: number,
 ): Promise<void> {
+  resolverBudget().require(milliseconds + 2_000);
   return new Promise(
     (resolve) => {
       setTimeout(
@@ -866,7 +868,7 @@ async function cleanupCourseStorage(
 }
 
 export const handler: Schema["deleteAdminCourse"]["functionHandler"] =
-  async (event) => {
+  async (event) => withResolverBudget(24_000, async () => {
     try {
       assertAdmin(
         event.identity,
@@ -1177,4 +1179,4 @@ export const handler: Schema["deleteAdminCourse"]["functionHandler"] =
 
       throw error;
     }
-  };
+  });

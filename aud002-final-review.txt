@@ -1,0 +1,621 @@
+===== CHECKOUT SESSION =====
+import { createHash } from "node:crypto";
+import { DynamoDBClient, GetItemCommand, TransactWriteItemsCommand, UpdateItemCommand, type AttributeValue, type UpdateItemCommandInput } from "@aws-sdk/client-dynamodb";
+import type Stripe from "stripe";
+import { ResolverBudget } from "./resolver-budget";
+
+// Shorter than Stripe's minimum 24h idempotency retention. Beyond this window
+// an unknown POST stays blocked for manual reconciliation, never a fresh POST.
+export const CHECKOUT_REPLAY_WINDOW_MS = 23 * 60 * 60 * 1000;
+export type CheckoutContract = {
+  purchaseIntentId: string; userId: string; stripeCustomerId: string; planCode: string;
+  billingContractVersion: string; stripePriceId: string; amountTotal: number;
+  currency: string; accessDays: number; termsVersion: string; privacyVersion: string;
+  checkoutConsentVersion: string; appBaseUrl: string; livemode: boolean;
+};
+export type CheckoutRecoveryResult =
+  | { status: "READY"; url: string; sessionId: string }
+  | { status: "COMPLETED"; sessionId: string }
+  | { status: "EXPIRED" };
+type Item = Record<string, AttributeValue>;
+// Allowed predecessors for recovery writes. Terminal states have no outgoing
+// recovery transitions. PAYMENT_FAILED is committed by the signed webhook;
+// financial PAID remains independently protected by every status condition.
+const lifecyclePredecessors = {
+  NOT_STARTED: [],
+  CREATING: ["NOT_STARTED"],
+  SESSION_KNOWN: ["CREATING", "SESSION_KNOWN"],
+  READY: ["CREATING", "SESSION_KNOWN", "READY"],
+  EXPIRED: ["CREATING", "SESSION_KNOWN", "READY", "EXPIRED"],
+  NOT_STARTED_EXPIRED: ["NOT_STARTED"],
+  PAYMENT_FAILED: [],
+} as const;
+
+async function writeLifecycle(db: DynamoDBClient, input: UpdateItemCommandInput,
+  target: keyof typeof lifecyclePredecessors): Promise<void> {
+  const sources: readonly string[] = lifecyclePredecessors[target];
+  const values = Object.fromEntries(sources.map((state, index) => [`:source${index}`, { S: state }]));
+  try {
+    await db.send(new UpdateItemCommand({
+      ...input,
+      ConditionExpression: `${input.ConditionExpression} AND sessionCreationState IN (${Object.keys(values).join(", ")})`,
+      ExpressionAttributeValues: { ...input.ExpressionAttributeValues, ...values },
+    }));
+  } catch (error) {
+    if (!(error instanceof Error) || error.name !== "ConditionalCheckFailedException") throw error;
+    // Do not restart resolution: that could replay a POST or accept a stale
+    // Stripe snapshot. A later request must obtain fresh authoritative evidence.
+    const { Item: latest } = await db.send(new GetItemCommand({
+      TableName: input.TableName, Key: input.Key, ConsistentRead: true,
+    }));
+    throw new Error(`Checkout lifecycle conflict; retry/reconciliation required (${latest?.status?.S ?? "missing"}/${latest?.sessionCreationState?.S ?? "missing"}).`, { cause: error });
+  }
+}
+
+export function checkoutAttemptKey(userId: string, intentId: string): string {
+  return "checkout_" + createHash("sha256").update(JSON.stringify([userId, intentId])).digest("hex");
+}
+type Dependencies = {
+  db: DynamoDBClient; stripe: Stripe; attemptsTable: string; customersTable: string;
+  budget: ResolverBudget;
+};
+const text = (item: Item, key: string): string => {
+  const value = item[key]?.S;
+  if (!value) throw new Error(`Invalid checkout attempt field: ${key}`);
+  return value;
+};
+const objectId = (value: string | { id: string } | null) => typeof value === "string" ? value : value?.id;
+
+function metadata(contract: CheckoutContract, attemptId: string) {
+  return {
+    checkoutAttemptId: attemptId, appUserId: contract.userId, planCode: contract.planCode,
+    billingContractVersion: contract.billingContractVersion, stripePriceId: contract.stripePriceId,
+    termsVersion: contract.termsVersion, privacyVersion: contract.privacyVersion,
+    checkoutConsentVersion: contract.checkoutConsentVersion,
+  };
+}
+
+export function sessionParameters(contract: CheckoutContract, attemptId: string, createdAt: number): Stripe.Checkout.SessionCreateParams {
+  const tags = metadata(contract, attemptId);
+  return {
+    mode: "payment", customer: contract.stripeCustomerId, client_reference_id: contract.userId,
+    line_items: [{ price: contract.stripePriceId, quantity: 1 }],
+    success_url: `${contract.appBaseUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${contract.appBaseUrl}/checkout/cancel`, locale: "pl",
+    // Stable across retries, and bounds the lifetime of abandoned open sessions.
+    expires_at: Math.floor(createdAt / 1000) + 2 * 60 * 60,
+    metadata: tags, payment_intent_data: { metadata: tags },
+  };
+}
+
+export function verifyCheckoutSession(session: Stripe.Checkout.Session, item: Item, expected: CheckoutContract): void {
+  const attemptId = text(item, "checkoutAttemptId");
+  const lines = session.line_items;
+  if (text(item, "userId") !== expected.userId || text(item, "stripeCustomerId") !== expected.stripeCustomerId ||
+      session.livemode !== expected.livemode || session.mode !== "payment" ||
+      session.client_reference_id !== expected.userId || objectId(session.customer) !== expected.stripeCustomerId ||
+      session.currency !== text(item, "currency") || session.amount_total !== Number(item.amountTotal?.N) ||
+      !session.id.startsWith(expected.livemode ? "cs_live_" : "cs_test_") ||
+      !lines || lines.has_more || lines.data.length !== 1 || lines.data[0].quantity !== 1 ||
+      objectId(lines.data[0].price) !== text(item, "stripePriceId")) {
+    throw new Error("Recovered checkout does not match the trusted purchase contract.");
+  }
+  for (const [key, value] of Object.entries({
+    checkoutAttemptId: attemptId, appUserId: text(item, "userId"),
+    planCode: text(item, "planCode"), billingContractVersion: text(item, "billingContractVersion"),
+    stripePriceId: text(item, "stripePriceId"), termsVersion: text(item, "termsVersion"),
+    privacyVersion: text(item, "privacyVersion"), checkoutConsentVersion: text(item, "checkoutConsentVersion"),
+  })) {
+    if (session.metadata?.[key] !== value) throw new Error("Recovered checkout metadata mismatch.");
+  }
+  if (item.stripeCheckoutSessionId?.S && item.stripeCheckoutSessionId.S !== session.id) {
+    throw new Error("Checkout session association changed.");
+  }
+}
+
+function attemptItem(contract: CheckoutContract, attemptId: string, now: number): Item {
+  const timestamp = new Date(now).toISOString();
+  const strings = {
+    checkoutAttemptId: attemptId, purchaseIntentId: contract.purchaseIntentId, userId: contract.userId, stripeCustomerId: contract.stripeCustomerId,
+    planCode: contract.planCode, billingContractVersion: contract.billingContractVersion,
+    stripePriceId: contract.stripePriceId, currency: contract.currency, checkoutMode: "payment",
+    termsVersion: contract.termsVersion, privacyVersion: contract.privacyVersion,
+    checkoutConsentVersion: contract.checkoutConsentVersion,
+    consentedAt: timestamp, createdAt: timestamp, updatedAt: timestamp,
+    status: "CREATED", sessionCreationState: "NOT_STARTED",
+    sessionParameters: JSON.stringify(sessionParameters(contract, attemptId, now)),
+  };
+  return {
+    ...Object.fromEntries(Object.entries(strings).map(([key, value]) => [key, { S: value }])),
+    stripeLivemode: { BOOL: contract.livemode },
+    amountTotal: { N: String(contract.amountTotal) }, accessDays: { N: String(contract.accessDays) },
+    immediateDeliveryConsent: { BOOL: true }, withdrawalRightLossAcknowledged: { BOOL: true },
+  };
+}
+
+/** One protected intent per user across tabs/devices. The pointer has no TTL:
+ * limiter expiry must never erase an ambiguous payment operation.
+ */
+export async function recoverOrCreateCheckout(deps: Dependencies, contract: CheckoutContract): Promise<CheckoutRecoveryResult> {
+  const { db, attemptsTable, customersTable, budget } = deps;
+  const attemptId = checkoutAttemptKey(contract.userId, contract.purchaseIntentId);
+  const customerKey = { userId: { S: contract.userId } };
+  const { Item: customer } = await db.send(new GetItemCommand({
+    TableName: customersTable, Key: customerKey, ConsistentRead: true,
+  }));
+  if (customer?.stripeCustomerId?.S !== contract.stripeCustomerId) throw new Error("Billing customer changed.");
+  // Legacy customers may still own sessions created before durable pointers.
+  // Absence alone is NOT proof of no active checkout. No automatic migration.
+  if (customer.checkoutRecoveryReady?.BOOL !== true) {
+    throw new Error("Legacy checkout inventory must be reconciled before starting a protected checkout.");
+  }
+  const previous = customer.activeCheckoutAttemptId?.S;
+  let item: Item | undefined;
+  // Deterministic key remembers the same intent even after the active pointer
+  // has moved to a later purchase. A delayed retry cannot become a new purchase.
+  const known = await db.send(new GetItemCommand({ TableName: attemptsTable,
+    Key: { checkoutAttemptId: { S: attemptId } }, ConsistentRead: true }));
+  if (known.Item) {
+    const resolved = await resolveAttempt(deps, known.Item, contract);
+    return resolved ?? { status: "EXPIRED" };
+  }
+  if (previous) {
+    const result = await db.send(new GetItemCommand({
+      TableName: attemptsTable, Key: { checkoutAttemptId: { S: previous } }, ConsistentRead: true,
+    }));
+    item = result.Item;
+    if (!item || item.checkoutAttemptId?.S !== previous || item.userId?.S !== contract.userId ||
+        item.stripeCustomerId?.S !== contract.stripeCustomerId) throw new Error("Invalid active checkout pointer; reconciliation required.");
+    const resolved = await resolveAttempt(deps, item, contract);
+    if (resolved?.status === "READY") throw new Error("Inna sesja płatności jest aktywna. Wróć do poprzedniej sesji lub poczekaj na jej wygaśnięcie.");
+    // Only authoritative expiry, paid webhook commit, or confirmed failed payment
+    // permits rotating the pointer. No deletion of historical attempts.
+  }
+  item = attemptItem(contract, attemptId, Date.now());
+  budget.require(14_000);
+  await db.send(new TransactWriteItemsCommand({ TransactItems: [
+    { Put: { TableName: attemptsTable, Item: item, ConditionExpression: "attribute_not_exists(checkoutAttemptId)" } },
+    { Update: { TableName: customersTable, Key: customerKey,
+      UpdateExpression: "SET activeCheckoutAttemptId = :attempt",
+      ConditionExpression: "stripeCustomerId = :customer AND checkoutRecoveryReady = :ready AND " + (previous ? "activeCheckoutAttemptId = :previous" : "attribute_not_exists(activeCheckoutAttemptId)"),
+      ExpressionAttributeValues: { ":ready": { BOOL: true }, ":customer": { S: contract.stripeCustomerId }, ":attempt": { S: attemptId },
+        ...(previous ? { ":previous": { S: previous } } : {}),
+      },
+    } },
+  ] }));
+  return await resolveAttempt(deps, item, contract) ?? { status: "EXPIRED" };
+}
+
+async function resolveAttempt(deps: Dependencies, item: Item, contract: CheckoutContract): Promise<CheckoutRecoveryResult | null> {
+  const { db, stripe, attemptsTable, budget } = deps;
+  const attemptId = text(item, "checkoutAttemptId");
+  if (item.userId?.S !== contract.userId || item.stripeCustomerId?.S !== contract.stripeCustomerId ||
+      item.stripeLivemode?.BOOL !== contract.livemode) {
+    throw new Error("Stored checkout owner/customer/environment mismatch.");
+  }
+  const key = { checkoutAttemptId: { S: attemptId } };
+  let sessionId = item.stripeCheckoutSessionId?.S;
+  if (!sessionId) {
+    if (text(item, "status") !== "CREATED") throw new Error("Paid checkout missing session ID.");
+    const state = text(item, "sessionCreationState");
+    if (state === "NOT_STARTED_EXPIRED") return null;
+    if (!["NOT_STARTED", "CREATING"].includes(state)) throw new Error("Unknown checkout creation state.");
+    const created = Date.parse(text(item, "createdAt"));
+    if (!Number.isFinite(created) || created > Date.now()) throw new Error("Invalid checkout creation time.");
+    if (state === "NOT_STARTED" && Date.now() - created >= 60 * 60 * 1000) {
+      // Fence any stale invocation BEFORE permitting pointer rotation. This also
+      // avoids first creating a session with an expires_at less than 30m away.
+      await writeLifecycle(db, { TableName: attemptsTable, Key: key,
+        UpdateExpression: "SET sessionCreationState = :retired",
+        ConditionExpression: "#status = :created AND sessionCreationState = :notStarted AND attribute_not_exists(stripeCheckoutSessionId)",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":retired": { S: "NOT_STARTED_EXPIRED" }, ":created": { S: "CREATED" }, ":notStarted": { S: "NOT_STARTED" } },
+      }, "NOT_STARTED_EXPIRED");
+      return null;
+    }
+    if (Date.now() - created >= CHECKOUT_REPLAY_WINDOW_MS) {
+      throw new Error("Checkout outcome requires manual reconciliation; replay window elapsed.");
+    }
+    // Reserve POST + fresh GET + persistence + final consistency read.
+    budget.require(12_000);
+    if (state === "NOT_STARTED") {
+      await writeLifecycle(db, { TableName: attemptsTable, Key: key,
+        UpdateExpression: "SET sessionCreationState = :creating",
+        ConditionExpression: "#status = :created AND sessionCreationState = :notStarted",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":creating": { S: "CREATING" }, ":notStarted": { S: "NOT_STARTED" }, ":created": { S: "CREATED" } },
+      }, "CREATING");
+    }
+    // Immutable serialized request survives price, legal and APP_BASE_URL deploys.
+    // No automatic SDK retry; a later user request replays exactly this operation.
+    const params = JSON.parse(text(item, "sessionParameters")) as Stripe.Checkout.SessionCreateParams;
+    const session = await stripe.checkout.sessions.create(params, {
+      idempotencyKey: `poprostumatma:checkout:${attemptId}`, timeout: 4_000, maxNetworkRetries: 0,
+    });
+    sessionId = session.id;
+    // Persist the known ID BEFORE further external reads. A lost response is
+    // recovered by replay; a webhook may already have committed PAID instead.
+    await writeLifecycle(db, { TableName: attemptsTable, Key: key,
+      UpdateExpression: "SET stripeCheckoutSessionId = :session, sessionCreationState = :known",
+      ConditionExpression: "#status = :created AND (attribute_not_exists(stripeCheckoutSessionId) OR stripeCheckoutSessionId = :session)",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: { ":session": { S: sessionId }, ":known": { S: "SESSION_KNOWN" }, ":created": { S: "CREATED" } },
+    }, "SESSION_KNOWN");
+  }
+  budget.require(6_000);
+  const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ["line_items"] }, { timeout: 2_500, maxNetworkRetries: 0 });
+  verifyCheckoutSession(session, item, contract);
+  const { Item: latest } = await db.send(new GetItemCommand({ TableName: attemptsTable, Key: key, ConsistentRead: true }));
+  if (!latest || (latest.stripeCheckoutSessionId?.S && latest.stripeCheckoutSessionId.S !== session.id)) throw new Error("Checkout association changed.");
+  if (session.status === "expired") {
+    if (session.payment_status !== "unpaid" || latest.status?.S === "PAID") throw new Error("Expired checkout has conflicting payment state.");
+    await writeLifecycle(db, { TableName: attemptsTable, Key: key,
+      UpdateExpression: "SET stripeCheckoutSessionId = :session, sessionCreationState = :expired",
+      ConditionExpression: "#status = :created AND (attribute_not_exists(stripeCheckoutSessionId) OR stripeCheckoutSessionId = :session)",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: { ":session": { S: session.id }, ":expired": { S: "EXPIRED" }, ":created": { S: "CREATED" } },
+    }, "EXPIRED");
+    return null;
+  }
+  if (session.status === "complete") {
+    if (latest.status?.S === "PAID" && latest.stripeCheckoutSessionId?.S === session.id) return { status: "COMPLETED", sessionId: session.id };
+    if (session.payment_status === "unpaid" && latest.sessionCreationState?.S === "PAYMENT_FAILED") return null;
+    throw new Error("Płatność jest przetwarzana. Sprawdź status zakupu przed kolejną próbą.");
+  }
+  if (session.status !== "open" || session.payment_status !== "unpaid" || latest.status?.S !== "CREATED" ||
+      session.expires_at * 1000 <= Date.now() || !session.url?.startsWith("https://checkout.stripe.com/")) {
+    throw new Error("Checkout is not active.");
+  }
+  // An existing active session must match the currently selected offer/consents.
+  // Mismatched open attempts remain protected until they expire; never duplicate.
+  if (text(item, "planCode") !== contract.planCode || text(item, "stripePriceId") !== contract.stripePriceId ||
+      Number(item.amountTotal?.N) !== contract.amountTotal || text(item, "currency") !== contract.currency ||
+      text(item, "termsVersion") !== contract.termsVersion || text(item, "privacyVersion") !== contract.privacyVersion ||
+      text(item, "checkoutConsentVersion") !== contract.checkoutConsentVersion ||
+      text(item, "billingContractVersion") !== contract.billingContractVersion) {
+    throw new Error("Poprzednia sesja ma inne warunki. Poczekaj na jej wygaśnięcie lub skontaktuj się z obsługą.");
+  }
+  await writeLifecycle(db, { TableName: attemptsTable, Key: key,
+    UpdateExpression: "SET stripeCheckoutSessionId = :session, sessionCreationState = :ready, updatedAt = :now",
+    ConditionExpression: "#status = :created AND (attribute_not_exists(stripeCheckoutSessionId) OR stripeCheckoutSessionId = :session)",
+    ExpressionAttributeNames: { "#status": "status" },
+    ExpressionAttributeValues: { ":session": { S: session.id }, ":ready": { S: "READY" }, ":created": { S: "CREATED" }, ":now": { S: new Date().toISOString() } },
+  }, "READY");
+  return { status: "READY", url: session.url, sessionId: session.id };
+}
+===== CHECKOUT RECOVERY TESTS =====
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { DynamoDBClient, GetItemCommand, TransactWriteItemsCommand, UpdateItemCommand, type AttributeValue } from "@aws-sdk/client-dynamodb";
+import type Stripe from "stripe";
+import { checkoutAttemptKey, recoverOrCreateCheckout, type CheckoutContract } from "../amplify/shared/checkout-session";
+import { ResolverBudget, budgetedClient, resolverBudget, withResolverBudget } from "../amplify/shared/resolver-budget";
+
+type Item = Record<string, AttributeValue>;
+const contract: CheckoutContract = {
+  purchaseIntentId: "a4e98676-6752-4f35-9dc9-06d27f79f861", userId: "user-a",
+  stripeCustomerId: "cus_customer123", planCode: "ONE_MONTH", billingContractVersion: "v1",
+  stripePriceId: "price_plan123", amountTotal: 9900, currency: "pln", accessDays: 30,
+  termsVersion: "v1", privacyVersion: "v1", checkoutConsentVersion: "v1",
+  appBaseUrl: "https://example.test", livemode: false,
+};
+
+// Evaluate the actual expression, rejecting unsupported syntax rather than
+// inferring conditions from which values happen to be present.
+function conditionMatches(expression: string, item: Item, values: Item, names: Record<string, string> = {}): boolean {
+  const tokens = expression.match(/attribute_not_exists|[#:A-Za-z_][\w:#]*|[(),=]/g)!;
+  assert.equal(tokens.join(""), expression.replace(/\s/g, ""));
+  let index = 0;
+  const take = (expected: string) => { assert.equal(tokens[index++], expected); };
+  const attribute = (name: string) => item[names[name] ?? name];
+  const equal = (a: AttributeValue | undefined, b: AttributeValue | undefined) => a !== undefined && b !== undefined && JSON.stringify(a) === JSON.stringify(b);
+  function atom(): boolean {
+    if (tokens[index] === "(") { index++; const result = or(); take(")"); return result; }
+    if (tokens[index] === "attribute_not_exists") {
+      index++; take("("); const result = attribute(tokens[index++]) === undefined; take(")"); return result;
+    }
+    const value = attribute(tokens[index++]);
+    if (tokens[index] === "IN") {
+      index++; take("("); let result = equal(value, values[tokens[index++]]);
+      while (tokens[index] === ",") { index++; const match = equal(value, values[tokens[index++]]); result = result || match; }
+      take(")"); return result;
+    }
+    take("="); return equal(value, values[tokens[index++]]);
+  }
+  function and(): boolean {
+    let result = atom();
+    while (tokens[index] === "AND") { index++; const next = atom(); result = result && next; }
+    return result;
+  }
+  function or(): boolean {
+    let result = and();
+    while (tokens[index] === "OR") { index++; const next = and(); result = result || next; }
+    return result;
+  }
+  const result = or(); assert.equal(index, tokens.length); return result;
+}
+
+/** In-memory transport only: no SDK client/credentials/network is constructed.
+ * Models atomic compare-and-swap and injected lost responses; it does not prove
+ * DynamoDB expression syntax or Stripe's production idempotency behavior.
+ */
+function fixture() {
+  const customer: Item = { userId: { S: contract.userId }, stripeCustomerId: { S: contract.stripeCustomerId }, checkoutRecoveryReady: { BOOL: true } };
+  const attempts = new Map<string, Item>();
+  const sessions = new Map<string, Stripe.Checkout.Session>();
+  const posts: { key: string; params: Stripe.Checkout.SessionCreateParams }[] = [];
+  let losePostResponse = false;
+  let loseTransactionResponse = false;
+  let failArm = false;
+  let failKnownWrite = false;
+  let failRetrieve = false;
+  let beforeUpdate: ((input: UpdateItemCommand["input"], item: Item) => void | Promise<void>) | undefined;
+  let pausePost: Promise<void> | undefined;
+  const fail = () => { throw Object.assign(new Error("conditional conflict"), { name: "ConditionalCheckFailedException" }); };
+  const db = { send: async (command: unknown) => {
+    if (command instanceof GetItemCommand) {
+      const input = command.input;
+      const item = input.TableName === "customers" ? customer : attempts.get(input.Key!.checkoutAttemptId.S!);
+      return { Item: item ? structuredClone(item) : undefined };
+    }
+    if (command instanceof TransactWriteItemsCommand) {
+      const [put, update] = command.input.TransactItems!;
+      const item = put.Put!.Item!;
+      const values = update.Update!.ExpressionAttributeValues!;
+      if (!conditionMatches(put.Put!.ConditionExpression!, attempts.get(item.checkoutAttemptId.S!) ?? {}, put.Put!.ExpressionAttributeValues ?? {}) ||
+          !conditionMatches(update.Update!.ConditionExpression!, customer, values, update.Update!.ExpressionAttributeNames)) fail();
+      attempts.set(item.checkoutAttemptId.S!, structuredClone(item));
+      customer.activeCheckoutAttemptId = values[":attempt"];
+      if (loseTransactionResponse) { loseTransactionResponse = false; throw new Error("Lost transaction response"); }
+      return {};
+    }
+    if (command instanceof UpdateItemCommand) {
+      const input = command.input;
+      const item = attempts.get(input.Key!.checkoutAttemptId.S!)!;
+      const values = input.ExpressionAttributeValues!;
+      if (failArm && values[":creating"]) { failArm = false; throw new Error("Arm write not sent"); }
+      if (failKnownWrite && values[":known"]) { failKnownWrite = false; throw new Error("Lost association write"); }
+      await beforeUpdate?.(input, item);
+      if (!conditionMatches(input.ConditionExpression!, item, values, input.ExpressionAttributeNames)) fail();
+      if (values[":session"]) item.stripeCheckoutSessionId = values[":session"];
+      item.sessionCreationState = values[":creating"] ?? values[":known"] ?? values[":ready"] ?? values[":expired"] ?? values[":retired"];
+      if (values[":now"]) item.updatedAt = values[":now"];
+      return {};
+    }
+    throw new Error("Unexpected database command");
+  } } as unknown as DynamoDBClient;
+  const stripe = { checkout: { sessions: {
+    create: async (params: Stripe.Checkout.SessionCreateParams, options: Stripe.RequestOptions) => {
+      posts.push({ key: options.idempotencyKey!, params: structuredClone(params) });
+      let session = sessions.get(options.idempotencyKey!);
+      if (!session) {
+        session = {
+          id: `cs_test_session${sessions.size}abcdef`, customer: params.customer,
+          mode: "payment", livemode: false, client_reference_id: params.client_reference_id,
+          currency: "pln", amount_total: 9900, metadata: params.metadata,
+          status: "open", payment_status: "unpaid", expires_at: params.expires_at,
+          url: "https://checkout.stripe.com/c/pay/session",
+          line_items: { has_more: false, data: [{ quantity: 1, price: { id: contract.stripePriceId } }] },
+        } as unknown as Stripe.Checkout.Session;
+        sessions.set(options.idempotencyKey!, session);
+      }
+      if (pausePost) await pausePost;
+      if (losePostResponse) { losePostResponse = false; throw new Error("Stripe response lost after remote success"); }
+      return structuredClone(session);
+    },
+    retrieve: async (id: string) => {
+      if (failRetrieve) { failRetrieve = false; throw new Error("GET timed out"); }
+      const session = [...sessions.values()].find((value) => value.id === id);
+      assert.ok(session);
+      return structuredClone(session);
+    },
+  } } } as unknown as Stripe;
+  const run = (override: Partial<CheckoutContract> = {}) => recoverOrCreateCheckout({
+    db, stripe, attemptsTable: "attempts", customersTable: "customers", budget: new ResolverBudget(24_000),
+  }, { ...contract, ...override });
+  return {
+    run, customer, attempts, sessions, posts,
+    faults: {
+      losePost: () => { losePostResponse = true; }, loseTransaction: () => { loseTransactionResponse = true; },
+      failArm: () => { failArm = true; }, failKnown: () => { failKnownWrite = true; }, failGet: () => { failRetrieve = true; },
+      beforeUpdate: (hook: NonNullable<typeof beforeUpdate>) => { beforeUpdate = hook; },
+      pausePost: (promise: Promise<void>) => { pausePost = promise; },
+    },
+  };
+}
+
+describe("durable checkout recovery (offline transports)", () => {
+  it("recovers an ambiguous POST with identical parameters/key and one remote session", async () => {
+    const f = fixture(); f.faults.losePost();
+    await assert.rejects(f.run());
+    assert.equal([...f.attempts.values()][0].sessionCreationState.S, "CREATING");
+    assert.equal((await f.run()).status, "READY");
+    assert.equal(f.sessions.size, 1); assert.equal(f.attempts.size, 1);
+    assert.deepEqual(f.posts[0], f.posts[1]);
+  });
+  it("recovers a committed reservation whose response was lost", async () => {
+    const f = fixture(); f.faults.loseTransaction();
+    await assert.rejects(f.run()); assert.equal(f.posts.length, 0);
+    assert.equal((await f.run()).status, "READY"); assert.equal(f.attempts.size, 1);
+  });
+  it("distinguishes failure before arming from an attempted POST", async () => {
+    const f = fixture(); f.faults.failArm();
+    await assert.rejects(f.run()); assert.equal(f.posts.length, 0);
+    assert.equal([...f.attempts.values()][0].sessionCreationState.S, "NOT_STARTED");
+    await f.run(); assert.equal(f.sessions.size, 1);
+  });
+  it("recovers lost session-ID persistence with the original POST key", async () => {
+    const f = fixture(); f.faults.failKnown(); await assert.rejects(f.run()); await f.run();
+    assert.equal(f.sessions.size, 1); assert.deepEqual(f.posts[0], f.posts[1]);
+  });
+  it("persists the ID before a failing verification GET and never repeats POST", async () => {
+    const f = fixture(); f.faults.failGet(); await assert.rejects(f.run());
+    assert.ok([...f.attempts.values()][0].stripeCheckoutSessionId.S);
+    await f.run(); assert.equal(f.posts.length, 1);
+  });
+  it("serializes different concurrent intents using one customer pointer", async () => {
+    const f = fixture();
+    const results = await Promise.allSettled([f.run(), f.run({ purchaseIntentId: "other-intent" })]);
+    assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
+    assert.equal(f.attempts.size, 1); assert.equal(f.sessions.size, 1);
+  });
+  it("serializes concurrent retries of the same intent", async () => {
+    const f = fixture(); await Promise.allSettled([f.run(), f.run()]);
+    assert.equal(f.attempts.size, 1); assert.equal(f.sessions.size, 1);
+    assert.equal((await f.run()).status, "READY");
+  });
+  it("never replays an unknown POST after the retention safety window", async () => {
+    const f = fixture(); f.faults.losePost(); await assert.rejects(f.run());
+    [...f.attempts.values()][0].createdAt = { S: new Date(Date.now() - 24 * 3600_000).toISOString() };
+    await assert.rejects(f.run(), /manual reconciliation/); assert.equal(f.posts.length, 1);
+  });
+  it("does not treat a missing legacy pointer as an empty checkout inventory", async () => {
+    const f = fixture(); delete f.customer.checkoutRecoveryReady;
+    await assert.rejects(f.run(), /Legacy checkout/); assert.equal(f.posts.length, 0); assert.equal(f.attempts.size, 0);
+  });
+  it("does not reuse expired sessions and allows a separate new intent", async () => {
+    const f = fixture(); await f.run(); [...f.sessions.values()][0].status = "expired";
+    assert.equal((await f.run()).status, "EXPIRED"); assert.equal(f.posts.length, 1);
+    assert.equal((await f.run({ purchaseIntentId: "new-intent" })).status, "READY"); assert.equal(f.sessions.size, 2);
+  });
+  it("waits for the payment transaction and remembers completed old intents", async () => {
+    const f = fixture(); await f.run(); const session = [...f.sessions.values()][0];
+    session.status = "complete"; session.payment_status = "paid";
+    await assert.rejects(f.run(), /przetwarzana/);
+    [...f.attempts.values()][0].status = { S: "PAID" };
+    assert.equal((await f.run()).status, "COMPLETED");
+    await f.run({ purchaseIntentId: "new-intent" });
+    assert.equal((await f.run()).status, "COMPLETED"); assert.equal(f.sessions.size, 2);
+  });
+  it("preserves a concurrent webhook PAID write before the POST response", async () => {
+    const f = fixture(); let release!: () => void;
+    f.faults.pausePost(new Promise<void>((resolve) => { release = resolve; }));
+    const running = f.run();
+    while (!f.sessions.size) await new Promise((resolve) => setImmediate(resolve));
+    const item = [...f.attempts.values()][0]; item.status = { S: "PAID" };
+    item.stripeCheckoutSessionId = { S: [...f.sessions.values()][0].id };
+    const session = [...f.sessions.values()][0]; session.status = "complete"; session.payment_status = "paid";
+    release(); await assert.rejects(running);
+    assert.equal(item.status.S, "PAID"); assert.equal((await f.run()).status, "COMPLETED");
+  });
+  for (const terminal of ["EXPIRED", "PAYMENT_FAILED"] as const) {
+    it(`rejects a stale READY write after concurrent ${terminal}`, async () => {
+      const f = fixture(); await f.run();
+      f.faults.beforeUpdate((input, item) => {
+        if (input.ExpressionAttributeValues?.[":ready"]) item.sessionCreationState = { S: terminal };
+      });
+      await assert.rejects(f.run(), /lifecycle conflict/);
+      assert.equal([...f.attempts.values()][0].sessionCreationState.S, terminal);
+      assert.equal(f.posts.length, 1);
+    });
+  }
+  it("fences open-session recovery when concurrent recovery commits expiry", async () => {
+    const f = fixture(); await f.run();
+    let interleaved = false;
+    f.faults.beforeUpdate(async (input) => {
+      if (!interleaved && input.ExpressionAttributeValues?.[":ready"]) {
+        interleaved = true;
+        [...f.sessions.values()][0].status = "expired";
+        assert.equal((await f.run()).status, "EXPIRED");
+      }
+    });
+    await assert.rejects(f.run(), /lifecycle conflict/);
+    assert.equal([...f.attempts.values()][0].sessionCreationState.S, "EXPIRED");
+    assert.equal(f.posts.length, 1);
+  });
+  for (const state of ["READY", "PAYMENT_FAILED", "EXPIRED"] as const) {
+    it(`preserves concurrent ${state} while a Stripe POST recovery response is pending`, async () => {
+      const f = fixture(); let release!: () => void;
+      f.faults.pausePost(new Promise<void>((resolve) => { release = resolve; }));
+      const running = f.run();
+      while (!f.sessions.size) await new Promise((resolve) => setImmediate(resolve));
+      const item = [...f.attempts.values()][0];
+      item.stripeCheckoutSessionId = { S: [...f.sessions.values()][0].id };
+      item.sessionCreationState = { S: state };
+      release(); await assert.rejects(running, /lifecycle conflict/);
+      assert.equal(item.sessionCreationState.S, state);
+      assert.equal(f.posts.length, 1); assert.equal(f.sessions.size, 1);
+    });
+  }
+  for (const target of ["ready", "expired", "creating", "retired"] as const) {
+    it(`preserves PAID committed immediately before ${target} update`, async () => {
+      const f = fixture();
+      if (target === "creating" || target === "retired") {
+        f.faults.failArm(); await assert.rejects(f.run());
+        if (target === "retired") [...f.attempts.values()][0].createdAt = { S: new Date(Date.now() - 2 * 3600_000).toISOString() };
+      } else {
+        await f.run();
+        if (target === "expired") [...f.sessions.values()][0].status = "expired";
+      }
+      const item = [...f.attempts.values()][0];
+      const previous = structuredClone(item.sessionCreationState);
+      f.faults.beforeUpdate((input, current) => {
+        if (input.ExpressionAttributeValues?.[`:${target}`]) current.status = { S: "PAID" };
+      });
+      await assert.rejects(f.run(), /lifecycle conflict/);
+      assert.equal(item.status.S, "PAID"); assert.deepEqual(item.sessionCreationState, previous);
+    });
+  }
+  it("does not overwrite webhook failure with a concurrent expiry write", async () => {
+    const f = fixture(); await f.run(); [...f.sessions.values()][0].status = "expired";
+    f.faults.beforeUpdate((input, item) => {
+      if (input.ExpressionAttributeValues?.[":expired"]) item.sessionCreationState = { S: "PAYMENT_FAILED" };
+    });
+    await assert.rejects(f.run(), /lifecycle conflict/);
+    assert.equal([...f.attempts.values()][0].sessionCreationState.S, "PAYMENT_FAILED");
+    assert.equal(f.posts.length, 1);
+  });
+  for (const [name, mutate] of [
+    ["owner", (s: Stripe.Checkout.Session) => { s.client_reference_id = "other"; }],
+    ["customer", (s: Stripe.Checkout.Session) => { s.customer = "cus_other"; }],
+    ["mode", (s: Stripe.Checkout.Session) => { s.livemode = true; }],
+    ["amount", (s: Stripe.Checkout.Session) => { s.amount_total = 1; }],
+    ["currency", (s: Stripe.Checkout.Session) => { s.currency = "eur"; }],
+    ["plan", (s: Stripe.Checkout.Session) => { s.metadata!.planCode = "OTHER"; }],
+    ["price", (s: Stripe.Checkout.Session) => { s.line_items!.data[0].price!.id = "price_other"; }],
+  ] as const) {
+    it(`rejects recovered ${name} mismatch`, async () => {
+      const f = fixture(); await f.run(); mutate([...f.sessions.values()][0]);
+      await assert.rejects(f.run()); assert.equal(f.posts.length, 1);
+    });
+  }
+  it("does not POST a recovered attempt under a different Stripe environment", async () => {
+    const f = fixture(); f.faults.losePost(); await assert.rejects(f.run());
+    await assert.rejects(f.run({ livemode: true }), /environment mismatch/); assert.equal(f.posts.length, 1);
+  });
+  it("retires an old unarmed attempt before allowing a new intent", async () => {
+    const f = fixture(); f.faults.failArm(); await assert.rejects(f.run());
+    [...f.attempts.values()][0].createdAt = { S: new Date(Date.now() - 2 * 3600_000).toISOString() };
+    assert.equal((await f.run()).status, "EXPIRED"); assert.equal(f.posts.length, 0);
+    assert.equal([...f.attempts.values()][0].sessionCreationState.S, "NOT_STARTED_EXPIRED");
+    assert.equal((await f.run({ purchaseIntentId: "next" })).status, "READY");
+  });
+  it("requires signed failure evidence before resolving complete/unpaid", async () => {
+    const f = fixture(); await f.run(); [...f.sessions.values()][0].status = "complete";
+    await assert.rejects(f.run(), /przetwarzana/);
+    [...f.attempts.values()][0].sessionCreationState = { S: "PAYMENT_FAILED" };
+    assert.equal((await f.run()).status, "EXPIRED");
+    assert.equal((await f.run({ purchaseIntentId: "next" })).status, "READY");
+  });
+  it("namespaces operation identities by authenticated user", () => {
+    assert.notEqual(checkoutAttemptKey("a", "intent"), checkoutAttemptKey("b", "intent"));
+  });
+});
+
+describe("resolver budgets", () => {
+  it("rejects an SDK call after the budget without starting it", async () => {
+    let calls = 0;
+    const client = budgetedClient({ send: async () => { calls++; } });
+    await assert.rejects(withResolverBudget(1, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5)); await client.send();
+    }));
+    assert.equal(calls, 0);
+  });
+  it("passes an abort signal and isolates concurrent invocation budgets", async () => {
+    const signals: AbortSignal[] = [];
+    const client = budgetedClient({ send: async (_?: unknown, options?: { abortSignal?: AbortSignal }) => { signals.push(options!.abortSignal!); } });
+    await Promise.all([withResolverBudget(1000, async () => { await client.send(); assert.equal(signals[0], resolverBudget().signal); }),
+      withResolverBudget(2000, async () => { await client.send(); assert.equal(signals[1], resolverBudget().signal); })]);
+    assert.notEqual(signals[0], signals[1]);
+  });
+});

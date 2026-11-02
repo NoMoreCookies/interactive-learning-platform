@@ -273,6 +273,7 @@ const schema = a
      */
     CreateCheckoutSessionResult:
       a.customType({
+        sessionId: a.string(),
         status:
           a.string().required(),
 
@@ -426,6 +427,7 @@ const schema = a
 createCheckoutSession: a
   .mutation()
   .arguments({
+    purchaseIntentId: a.string().required(),
     planCode:
       a.string().required(),
 
